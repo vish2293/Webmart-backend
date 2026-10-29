@@ -1,0 +1,80 @@
+import type { Request, Response } from 'express';
+import { idParamsSchema } from '../../lib/validation.js';
+import { getAuthenticatedUser } from '../../middleware/authenticate.js';
+import { isValidWebhookSignature } from '../../integrations/razorpay.js';
+import { BadRequestError } from '../../lib/errors.js';
+import * as orderPaymentsService from './order-payments.service.js';
+import * as ordersService from './orders.service.js';
+import {
+  createOrderSchema,
+  idempotencyKeySchema,
+  markPaidSchema,
+  razorpayWebhookEventSchema,
+  verifyRazorpayPaymentSchema,
+} from './orders.validation.js';
+
+export async function startRazorpayPayment(req: Request, res: Response) {
+  const { id } = idParamsSchema.parse(req.params);
+  const checkout = await orderPaymentsService.startRazorpayPayment(id, getAuthenticatedUser(req));
+  res.status(201).json(checkout);
+}
+
+export async function verifyRazorpayPayment(req: Request, res: Response) {
+  const { id } = idParamsSchema.parse(req.params);
+  const input = verifyRazorpayPaymentSchema.parse(req.body);
+  res.json(await orderPaymentsService.verifyRazorpayPayment(id, getAuthenticatedUser(req), input));
+}
+
+/** Mounted with `express.raw`, so `req.body` is the exact bytes Razorpay signed. */
+export async function handleRazorpayWebhook(req: Request, res: Response) {
+  const signature = req.header('x-razorpay-signature');
+  if (!Buffer.isBuffer(req.body) || !signature || !isValidWebhookSignature(req.body, signature)) {
+    throw new BadRequestError('Invalid webhook signature', 'WEBHOOK_SIGNATURE_INVALID');
+  }
+
+  let payload: unknown;
+  try {
+    payload = JSON.parse(req.body.toString('utf8'));
+  } catch {
+    throw new BadRequestError('Malformed webhook body', 'INVALID_BODY');
+  }
+
+  // Non-2xx makes Razorpay retry, which is what we want if the database is briefly down.
+  await orderPaymentsService.handleRazorpayWebhookEvent(razorpayWebhookEventSchema.parse(payload));
+  res.json({ status: 'ok' });
+}
+
+export async function createOrder(req: Request, res: Response) {
+  const input = createOrderSchema.parse(req.body);
+  const idempotencyKey = idempotencyKeySchema.parse(req.header('idempotency-key'));
+  const { order, isNew } = await ordersService.createOrder(
+    getAuthenticatedUser(req).id,
+    input,
+    idempotencyKey,
+  );
+  // 200 for a replayed request, so clients can tell it wasn't a second order.
+  res.status(isNew ? 201 : 200).json(order);
+}
+
+export async function getOrder(req: Request, res: Response) {
+  const { id } = idParamsSchema.parse(req.params);
+  res.json(await ordersService.getOrderForUser(id, getAuthenticatedUser(req)));
+}
+
+export async function listMyOrders(req: Request, res: Response) {
+  res.json(await ordersService.listOrdersForUser(getAuthenticatedUser(req).id));
+}
+
+export async function listAllOrders(_req: Request, res: Response) {
+  res.json(await ordersService.listAllOrders());
+}
+
+export async function markOrderPaid(req: Request, res: Response) {
+  const { id } = idParamsSchema.parse(req.params);
+  res.json(await ordersService.markOrderPaid(id, markPaidSchema.parse(req.body)));
+}
+
+export async function markOrderDelivered(req: Request, res: Response) {
+  const { id } = idParamsSchema.parse(req.params);
+  res.json(await ordersService.markOrderDelivered(id));
+}
