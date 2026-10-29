@@ -42,7 +42,7 @@ const envSchema = z.object({
   CRON_SECRET: z.string().min(16, 'CRON_SECRET must be at least 16 characters').optional(),
   /** Resend API key. Without it, emails are written to the log instead of being sent. */
   RESEND_API_KEY: z.string().min(1).optional(),
-  EMAIL_FROM: z.string().min(3).default('Webvoltz Store <onboarding@resend.dev>'),
+  EMAIL_FROM: z.string().min(3).default('WebMart <onboarding@resend.dev>'),
   /** Where the storefront lives, for links in emails. Defaults to the first CORS origin. */
   CLIENT_URL: z.url().optional(),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),

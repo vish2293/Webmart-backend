@@ -3,7 +3,7 @@ import type { EmailMessage } from '../integrations/email.js';
 
 type Template = Pick<EmailMessage, 'subject' | 'html' | 'text'>;
 
-const storeName = 'Webvoltz Store';
+const storeName = 'WebMart';
 
 const escapeHtml = (value: string) =>
   value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -36,13 +36,13 @@ function render(content: Content): Template {
         .join('')}</ul>`
     : '';
   const buttonHtml = content.button
-    ? `<p style="margin:22px 0"><a href="${escapeHtml(content.button.url)}" style="background:#FFC107;color:#000;text-decoration:none;font-weight:700;padding:12px 22px;border-radius:8px;display:inline-block">${escapeHtml(content.button.label)}</a></p>`
+    ? `<p style="margin:22px 0"><a href="${escapeHtml(content.button.url)}" style="background:#2DD4BF;color:#000;text-decoration:none;font-weight:700;padding:12px 22px;border-radius:8px;display:inline-block">${escapeHtml(content.button.label)}</a></p>`
     : '';
 
   const html = `<!doctype html><html><body style="margin:0;background:#f4f4f5;font-family:Arial,Helvetica,sans-serif;color:#18181b">
 <div style="max-width:560px;margin:0 auto;padding:24px 16px">
 <div style="background:#fff;border:1px solid #e4e4e7;border-radius:12px;padding:28px">
-<p style="margin:0 0 20px;font-weight:800;font-size:18px">${storeName}<span style="color:#FFC107">.</span></p>
+<p style="margin:0 0 20px;font-weight:800;font-size:18px">${storeName}<span style="color:#2DD4BF">.</span></p>
 <h1 style="margin:0 0 16px;font-size:20px">${escapeHtml(content.heading)}</h1>
 ${paragraphsHtml}${linesHtml}${buttonHtml}
 </div>
