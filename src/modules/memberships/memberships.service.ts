@@ -12,6 +12,7 @@ import { logger } from '../../lib/logger.js';
 import { Order } from '../orders/order.model.js';
 import { toPaise } from '../orders/order-pricing.js';
 import type { VerifyRazorpayPaymentInput } from '../orders/orders.validation.js';
+import { notifyMembership } from '../notifications/notifications.service.js';
 import { creditMembershipBonus } from '../rewards/rewards.service.js';
 import { User } from '../users/user.model.js';
 import { Membership, type MembershipRecord } from './membership.model.js';
@@ -195,7 +196,11 @@ export async function activateMembership(
     if (!claimed) {
       const existing = await Membership.findById(membershipId).session(session).lean();
       if (!existing) throw new NotFoundError('Membership not found', 'MEMBERSHIP_NOT_FOUND');
-      return { membership: existing, isDuplicate: existing.paymentId !== payment.id };
+      return {
+        membership: existing,
+        isDuplicate: existing.paymentId !== payment.id,
+        isNew: false,
+      };
     }
 
     // Renewing early starts the new period when the current one ends. The user document is the
@@ -219,7 +224,7 @@ export async function activateMembership(
       { session },
     );
     await creditMembershipBonus(claimed.user.toString(), membershipId, bonus, session);
-    return { membership: activated ?? claimed, isDuplicate: false };
+    return { membership: activated ?? claimed, isDuplicate: false, isNew: true };
   });
 
   if (result.isDuplicate) {
@@ -229,6 +234,7 @@ export async function activateMembership(
     );
     await refundDuplicateMembershipPayment(membershipId, payment.id, result.membership.pricePaid);
   }
+  if (result.isNew) await notifyMembership(membershipId, 'welcome');
   return result.membership;
 }
 

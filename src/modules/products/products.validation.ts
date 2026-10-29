@@ -12,6 +12,8 @@ export const listProductsQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(maxProductPageSize).default(maxProductPageSize),
 });
 
+export const suggestProductsQuerySchema = z.object({ q: z.string().trim().min(1).max(100) });
+
 export const productInputSchema = z.object({
   name: z.string().trim().min(1).max(200),
   description: z.string().trim().min(1).max(5000),

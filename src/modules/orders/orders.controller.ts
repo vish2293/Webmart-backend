@@ -28,6 +28,11 @@ export async function startRazorpayPayment(req: Request, res: Response) {
   res.status(201).json(checkout);
 }
 
+export async function switchToCashOnDelivery(req: Request, res: Response) {
+  const { id } = idParamsSchema.parse(req.params);
+  res.json(await orderPaymentsService.switchToCashOnDelivery(id, getAuthenticatedUser(req)));
+}
+
 export async function verifyRazorpayPayment(req: Request, res: Response) {
   const { id } = idParamsSchema.parse(req.params);
   const input = verifyRazorpayPaymentSchema.parse(req.body);

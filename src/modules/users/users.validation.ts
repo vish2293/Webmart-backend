@@ -33,6 +33,29 @@ export const updateProfileSchema = z.object({
   password: z.union([z.literal(''), newPasswordSchema]).optional(),
 });
 
+const addressLine = (max: number) => z.string().trim().min(1).max(max);
+
+export const addressInputSchema = z.object({
+  label: addressLine(30).default('Home'),
+  address: addressLine(200),
+  city: addressLine(100),
+  postalCode: addressLine(20),
+  country: addressLine(100),
+  isDefault: z.boolean().default(false),
+});
+
+export const addressParamsSchema = z.object({ addressId: z.string().regex(/^[a-f\d]{24}$/i) });
+
+export const forgotPasswordSchema = z.object({ email: emailSchema });
+
+export const resetPasswordSchema = z.object({
+  token: z.string().regex(/^[a-f0-9]{64}$/, 'Invalid reset link'),
+  password: newPasswordSchema,
+});
+
+export type AddressInput = z.infer<typeof addressInputSchema>;
+export type ForgotPasswordInput = z.infer<typeof forgotPasswordSchema>;
+export type ResetPasswordInput = z.infer<typeof resetPasswordSchema>;
 export type RegisterInput = z.infer<typeof registerSchema>;
 export type LoginInput = z.infer<typeof loginSchema>;
 export type UpdateProfileInput = z.infer<typeof updateProfileSchema>;

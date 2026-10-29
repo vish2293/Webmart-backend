@@ -1,4 +1,7 @@
 import bcrypt from 'bcryptjs';
+import { createHash, randomBytes } from 'node:crypto';
+import { sendEmail } from '../../integrations/email.js';
+import { passwordResetEmail, storeUrl } from '../../lib/email-templates.js';
 import {
   BadRequestError,
   ConflictError,
@@ -7,7 +10,13 @@ import {
 } from '../../lib/errors.js';
 import { signAccessToken, type VerifiedToken } from './token.js';
 import { User, type UserRecord } from './user.model.js';
-import type { LoginInput, RegisterInput, UpdateProfileInput } from './users.validation.js';
+import type {
+  ForgotPasswordInput,
+  LoginInput,
+  RegisterInput,
+  ResetPasswordInput,
+  UpdateProfileInput,
+} from './users.validation.js';
 import type { AuthenticatedUser, PublicUser, UserSession } from './users.types.js';
 
 type UserFields = Pick<UserRecord, '_id' | 'name' | 'email' | 'role'>;
@@ -49,6 +58,67 @@ export async function loginUser(input: LoginInput): Promise<UserSession> {
   if (!user || !(await bcrypt.compare(input.password, user.password))) {
     throw new UnauthorizedError('Invalid email or password', 'INVALID_CREDENTIALS');
   }
+  return toSession(user);
+}
+
+const resetValidMinutes = 60;
+const resetValidMs = resetValidMinutes * 60_000;
+/** A new reset email is not sent if one went out this recently (stops email flooding). */
+const resetResendCooldownMs = 60_000;
+
+const hashResetToken = (token: string) => createHash('sha256').update(token).digest('hex');
+
+/**
+ * Emails a one-time reset link. The caller always gets the same answer, whether or not the
+ * address has an account, so this can't be used to find out who is registered.
+ * ponytail: an existing account takes slightly longer (it sends the email), so the timing still
+ * hints at it; queue the email in a background worker to remove that.
+ */
+export async function requestPasswordReset({ email }: ForgotPasswordInput) {
+  const user = await User.findOne({ email }).select('name email passwordResetExpiresAt');
+  if (!user) return;
+
+  const issuedAt = user.passwordResetExpiresAt
+    ? user.passwordResetExpiresAt.getTime() - resetValidMs
+    : 0;
+  if (Date.now() - issuedAt < resetResendCooldownMs) return;
+
+  const token = randomBytes(32).toString('hex');
+  await User.updateOne(
+    { _id: user._id },
+    {
+      $set: {
+        passwordResetTokenHash: hashResetToken(token),
+        passwordResetExpiresAt: new Date(Date.now() + resetValidMs),
+      },
+    },
+  );
+  await sendEmail({
+    to: user.email,
+    ...passwordResetEmail(user.name, storeUrl(`/reset-password?token=${token}`), resetValidMinutes),
+  });
+}
+
+/**
+ * Sets a new password from an emailed token. The token is claimed with one guarded update, so
+ * two simultaneous uses can't both succeed; saving the password also signs out every other
+ * session. Logs the user in, since they just proved they own the mailbox.
+ */
+export async function resetPassword({ token, password }: ResetPasswordInput): Promise<UserSession> {
+  const claimed = await User.findOneAndUpdate(
+    { passwordResetTokenHash: hashResetToken(token), passwordResetExpiresAt: { $gt: new Date() } },
+    { $unset: { passwordResetTokenHash: 1, passwordResetExpiresAt: 1 } },
+  )
+    .select('_id')
+    .lean();
+  if (!claimed) {
+    throw new BadRequestError('This reset link is invalid or has expired', 'RESET_TOKEN_INVALID');
+  }
+
+  const user = await User.findById(claimed._id);
+  if (!user) throw new NotFoundError('User not found', 'USER_NOT_FOUND');
+  user.password = password;
+  await user.save();
   return toSession(user);
 }
 

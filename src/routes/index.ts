@@ -5,12 +5,14 @@ import { membershipsRouter } from '../modules/memberships/memberships.routes.js'
 import { runExpirySweeps } from '../modules/orders/order-expiry.job.js';
 import { handleRazorpayWebhook } from '../modules/orders/orders.controller.js';
 import { ordersRouter } from '../modules/orders/orders.routes.js';
+import { reviewsRouter } from '../modules/reviews/reviews.routes.js';
 import { productsRouter } from '../modules/products/products.routes.js';
 import { rewardsRouter } from '../modules/rewards/rewards.routes.js';
 import { usersRouter } from '../modules/users/users.routes.js';
 
 export const apiRouter = Router();
 
+apiRouter.use('/products/:productId/reviews', reviewsRouter);
 apiRouter.use('/products', productsRouter);
 apiRouter.use('/users', usersRouter);
 apiRouter.use('/orders', ordersRouter);

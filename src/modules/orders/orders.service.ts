@@ -2,6 +2,7 @@ import { Types, type ClientSession } from 'mongoose';
 import { isDuplicateKeyError, withTransaction } from '../../lib/db.js';
 import { ConflictError, ForbiddenError, NotFoundError } from '../../lib/errors.js';
 import { claimMembershipBenefit, isMembershipActive } from '../memberships/memberships.service.js';
+import { notifyOrder } from '../notifications/notifications.service.js';
 import { Product } from '../products/product.model.js';
 import {
   claimFirstOrderDiscount,
@@ -219,8 +220,12 @@ export async function createOrder(
         ],
         { session },
       );
+      if (!created) throw new Error('Order was not created');
       return created;
     });
+    // Online orders are confirmed by email once paid; cash on delivery is confirmed now.
+    if (order.paymentMethod === 'Cash on Delivery')
+      await notifyOrder(order._id.toString(), 'confirmed');
     return { order, isNew: true };
   } catch (error) {
     // A concurrent retry with the same key committed first.

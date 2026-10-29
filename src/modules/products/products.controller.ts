@@ -6,10 +6,16 @@ import {
   listProductsQuerySchema,
   productInputSchema,
   productUpdateSchema,
+  suggestProductsQuerySchema,
 } from './products.validation.js';
 
 export async function listProducts(req: Request, res: Response) {
   res.json(await productsService.listProducts(listProductsQuerySchema.parse(req.query)));
+}
+
+export async function suggestProducts(req: Request, res: Response) {
+  const { q } = suggestProductsQuerySchema.parse(req.query);
+  res.json(await productsService.suggestProducts(q));
 }
 
 export async function getProduct(req: Request, res: Response) {

@@ -9,6 +9,7 @@ import { withTransaction } from '../../lib/db.js';
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../../lib/errors.js';
 import { logger } from '../../lib/logger.js';
 import type { AuthenticatedUser } from '../users/users.types.js';
+import { notifyOrder } from '../notifications/notifications.service.js';
 import { applyMembershipRefundWebhook } from '../memberships/membership-refunds.service.js';
 import { handleMembershipPaymentEvent } from '../memberships/memberships.service.js';
 import { claimFirstOrderDiscount, spendPoints } from '../rewards/rewards.service.js';
@@ -100,7 +101,9 @@ async function handleLatePayment(
 
   if (hasExpired) {
     try {
-      return await reviveExpiredOrder(orderId, payment);
+      const revived = await reviveExpiredOrder(orderId, payment);
+      await notifyOrder(orderId, 'confirmed');
+      return revived;
     } catch (error) {
       if (error instanceof ConflictError && error.code === 'ORDER_CHANGED') {
         // A concurrent call for this payment got there first; report its outcome.
@@ -141,7 +144,10 @@ async function recordOnlinePayment(
     paidUpdate(payment),
     { new: true },
   ).lean();
-  if (paid) return paid;
+  if (paid) {
+    await notifyOrder(orderId, 'confirmed');
+    return paid;
+  }
 
   const existing = await Order.findById(orderId).lean();
   if (!existing) throw new NotFoundError('Order not found', 'ORDER_NOT_FOUND');
@@ -208,6 +214,58 @@ export async function startRazorpayPayment(orderId: string, payer: Authenticated
     /** The checkout window closes itself before this, so payments can't start after expiry. */
     expiresAt: paymentDeadline(order.createdAt).toISOString(),
   };
+}
+
+/**
+ * Lets the customer give up on paying online and pay cash on delivery instead. One-way: a COD
+ * order never expires, so turning an old COD order back into an online one would get it
+ * cancelled at once. Refused while Razorpay holds a payment for the order.
+ */
+export async function switchToCashOnDelivery(orderId: string, payer: AuthenticatedUser) {
+  const order = await findPayableOrder(orderId, payer);
+  if (order.isPaid) throw new ConflictError('Order is already paid', 'ORDER_ALREADY_PAID');
+  if (order.isCancelled) {
+    throw new ConflictError(
+      'This order was cancelled. Please place a new order.',
+      'ORDER_CANCELLED',
+    );
+  }
+  if (order.paymentMethod === 'Cash on Delivery') {
+    throw new ConflictError('This order is already pay on delivery', 'ORDER_ALREADY_COD');
+  }
+  if (paymentDeadline(order.createdAt).getTime() < Date.now()) {
+    throw new ConflictError(
+      'The payment window for this order has closed. Please place a new order.',
+      'ORDER_EXPIRED',
+    );
+  }
+  if (order.razorpayOrderId) {
+    const payments = await fetchRazorpayOrderPayments(order.razorpayOrderId);
+    if (payments.some((payment) => ['captured', 'authorized'].includes(payment.status))) {
+      throw new ConflictError(
+        'A payment for this order is being processed. Please wait a moment and refresh.',
+        'PAYMENT_IN_PROGRESS',
+      );
+    }
+  }
+
+  // ponytail: a payment started in the gap between the check above and this update is still
+  // recorded as paid by the webhook; the admin sees the order as paid and skips collecting cash.
+  const switched = await Order.findOneAndUpdate(
+    {
+      _id: orderId,
+      isPaid: false,
+      paymentMethod: { $ne: 'Cash on Delivery' },
+      refundedAt: { $exists: false },
+      ...notCancelled,
+    },
+    { paymentMethod: 'Cash on Delivery' },
+    { new: true },
+  ).lean();
+  if (!switched) {
+    throw new ConflictError('The order changed. Please reload and try again.', 'ORDER_CHANGED');
+  }
+  return switched;
 }
 
 export async function verifyRazorpayPayment(

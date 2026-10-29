@@ -4,6 +4,16 @@ import type { UserRole } from './users.types.js';
 
 const passwordSaltRounds = 10;
 
+export interface SavedAddressRecord {
+  _id: Types.ObjectId;
+  label: string;
+  address: string;
+  city: string;
+  postalCode: string;
+  country: string;
+  isDefault: boolean;
+}
+
 export interface UserRecord {
   _id: Types.ObjectId;
   name: string;
@@ -18,6 +28,11 @@ export interface UserRecord {
   firstOrderDiscountUsedAt?: Date;
   /** Plus benefits apply while this is in the future. Only changed with a Membership update. */
   membershipEndsAt?: Date;
+  /** The customer's address book; at most one entry has `isDefault`. */
+  addresses: SavedAddressRecord[];
+  /** SHA-256 of the emailed reset token; the token itself is never stored. */
+  passwordResetTokenHash?: string;
+  passwordResetExpiresAt?: Date;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -33,6 +48,18 @@ const userSchema = new Schema<UserRecord>(
     pointsBalance: { type: Number, required: true, default: 0, min: 0 },
     firstOrderDiscountUsedAt: Date,
     membershipEndsAt: Date,
+    addresses: [
+      {
+        label: { type: String, required: true, trim: true },
+        address: { type: String, required: true, trim: true },
+        city: { type: String, required: true, trim: true },
+        postalCode: { type: String, required: true, trim: true },
+        country: { type: String, required: true, trim: true },
+        isDefault: { type: Boolean, required: true, default: false },
+      },
+    ],
+    passwordResetTokenHash: { type: String, select: false, index: true },
+    passwordResetExpiresAt: { type: Date, select: false },
   },
   { timestamps: true },
 );

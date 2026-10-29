@@ -15,6 +15,7 @@ import {
   type OrderRecord,
   type RefundReason,
 } from './order.model.js';
+import { notifyOrder } from '../notifications/notifications.service.js';
 import { pointsEarnedFor } from './order-pricing.js';
 import { claimRefund, recordManualRefund, submitClaimedRefund } from './order-refunds.service.js';
 import { releaseStock } from './orders.service.js';
@@ -161,6 +162,7 @@ export async function cancelOrder(
 
   // Razorpay is called only after the cancel and the refund claim committed together.
   if (paymentToRefund) await submitClaimedRefund(orderId, paymentToRefund);
+  await notifyOrder(orderId, 'cancelled');
   return reloadOrder(orderId);
 }
 
@@ -177,7 +179,9 @@ export async function shipOrder(orderId: string) {
     { isShipped: true, shippedAt: new Date() },
     { new: true },
   ).lean();
-  return shipped ?? explainBlocked(await Order.findById(orderId).lean(), 'ship');
+  if (!shipped) return explainBlocked(await Order.findById(orderId).lean(), 'ship');
+  await notifyOrder(orderId, 'shipped');
+  return shipped;
 }
 
 /** Credits points once an order is both paid and delivered, whichever happened last. */
@@ -196,8 +200,8 @@ async function awardPointsIfComplete(order: OrderRecord, session: ClientSession)
   return awarded;
 }
 
-export function markOrderDelivered(orderId: string) {
-  return withTransaction(async (session) => {
+export async function markOrderDelivered(orderId: string) {
+  const result = await withTransaction(async (session) => {
     const delivered = await Order.findOneAndUpdate(
       {
         _id: orderId,
@@ -214,6 +218,8 @@ export function markOrderDelivered(orderId: string) {
     }
     return awardPointsIfComplete(delivered, session);
   });
+  await notifyOrder(orderId, 'delivered');
+  return result;
 }
 
 // ponytail: admin-only manual confirmation (e.g. cash collected). Online payments are recorded
@@ -257,5 +263,6 @@ export async function refundOrder(orderId: string, admin: AuthenticatedUser) {
   });
 
   if (paymentToRefund) await submitClaimedRefund(orderId, paymentToRefund);
+  await notifyOrder(orderId, 'refunded');
   return reloadOrder(orderId);
 }

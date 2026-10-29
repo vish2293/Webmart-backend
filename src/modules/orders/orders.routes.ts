@@ -24,6 +24,11 @@ ordersRouter.get('/myorders', ordersController.listMyOrders);
 ordersRouter.get('/:id', ordersController.getOrder);
 ordersRouter.post('/:id/razorpay', paymentRateLimit, ordersController.startRazorpayPayment);
 ordersRouter.post('/:id/razorpay/verify', paymentRateLimit, ordersController.verifyRazorpayPayment);
+ordersRouter.post(
+  '/:id/cash-on-delivery',
+  paymentRateLimit,
+  ordersController.switchToCashOnDelivery,
+);
 // Owner or admin; the service checks ownership.
 ordersRouter.post('/:id/cancel', cancelRateLimit, ordersController.cancelOrder);
 ordersRouter.put('/:id/pay', requireAdmin, ordersController.markOrderPaid);

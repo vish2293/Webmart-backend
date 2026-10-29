@@ -2,6 +2,7 @@ import { createRazorpayRefund, listRazorpayPaymentRefunds } from '../../integrat
 import { withTransaction } from '../../lib/db.js';
 import { ConflictError, ForbiddenError, NotFoundError } from '../../lib/errors.js';
 import { logger } from '../../lib/logger.js';
+import { notifyMembership } from '../notifications/notifications.service.js';
 import { toPaise } from '../orders/order-pricing.js';
 import { revokeMembershipBonus } from '../rewards/rewards.service.js';
 import { User } from '../users/user.model.js';
@@ -104,6 +105,7 @@ export async function refundMembership(
   });
 
   await submitMembershipRefund(membershipId);
+  await notifyMembership(membershipId, 'refunded');
   return loadMembership(membershipId);
 }
 
