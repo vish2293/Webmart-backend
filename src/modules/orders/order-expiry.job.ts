@@ -1,5 +1,6 @@
 import { env } from '../../config/env.js';
 import { logger } from '../../lib/logger.js';
+import { expireMemberships } from '../memberships/memberships.service.js';
 import { expireOrReconcileOrder, type ExpiryOutcome } from './order-payments.service.js';
 import { notCancelled, Order } from './order.model.js';
 
@@ -45,13 +46,20 @@ export async function expireUnpaidOrders(now = new Date()) {
   return counts;
 }
 
+/** Everything the periodic job (or the Vercel cron) settles: unpaid orders and memberships. */
+export async function runExpirySweeps() {
+  const orders = await expireUnpaidOrders();
+  const memberships = await expireMemberships();
+  return { orders, memberships };
+}
+
 /** Starts the periodic sweep. Returns a function that stops it and waits for a running sweep. */
 export function startOrderExpiryJob() {
   let running: Promise<unknown> | null = null;
 
   const timer = setInterval(() => {
     if (running) return; // Previous sweep still going; skip this tick.
-    running = expireUnpaidOrders()
+    running = runExpirySweeps()
       .catch((error: unknown) => logger.error({ err: error }, 'Order expiry sweep failed'))
       .finally(() => {
         running = null;

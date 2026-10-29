@@ -1,4 +1,6 @@
 import { model, Schema, type Types } from 'mongoose';
+import type { DeliveryOption } from './order-pricing.js';
+import { deliveryOptions } from './order-pricing.js';
 import type { PaymentMethod } from './orders.validation.js';
 
 export interface OrderItemRecord {
@@ -70,6 +72,15 @@ export interface OrderRecord {
   pointsEarnedAt?: Date;
   taxPrice: number;
   shippingPrice: number;
+  deliveryOption: DeliveryOption;
+  expressDeliveryPrice: number;
+  /** Plus benefits were applied to this order (snapshot at order time). */
+  memberBenefitsApplied: boolean;
+  /** Shipping and express fees Plus waived on this order. */
+  memberSavings: number;
+  /** 2 for Plus members; applied when the points are earned. */
+  pointsMultiplier: number;
+  estimatedDeliveryDate?: Date;
   totalPrice: number;
   isPaid: boolean;
   paidAt?: Date;
@@ -126,6 +137,12 @@ const orderSchema = new Schema<OrderRecord>(
     pointsEarnedAt: Date,
     taxPrice: { type: Number, required: true, default: 0 },
     shippingPrice: { type: Number, required: true, default: 0 },
+    deliveryOption: { type: String, required: true, enum: deliveryOptions, default: 'standard' },
+    expressDeliveryPrice: { type: Number, required: true, default: 0, min: 0 },
+    memberBenefitsApplied: { type: Boolean, required: true, default: false },
+    memberSavings: { type: Number, required: true, default: 0, min: 0 },
+    pointsMultiplier: { type: Number, required: true, default: 1, min: 1 },
+    estimatedDeliveryDate: Date,
     totalPrice: { type: Number, required: true, default: 0 },
     isPaid: { type: Boolean, required: true, default: false },
     paidAt: Date,

@@ -18,19 +18,30 @@ async function findRefund(orderId: string, paymentId: string): Promise<RefundRec
   return refund;
 }
 
-/** Updates the refund entry for `paymentId` via the positional operator. */
+/**
+ * Updates the refund entry for `paymentId`. With `onlyIfPending`, the update is skipped when a
+ * webhook already settled the entry, so a slower save can't overwrite the bank's answer.
+ */
 async function updateRefund(
   orderId: string,
   paymentId: string,
   set: Partial<RefundRecord>,
-  unset: (keyof RefundRecord)[] = [],
+  {
+    unset = [],
+    onlyIfPending = false,
+  }: { unset?: (keyof RefundRecord)[]; onlyIfPending?: boolean } = {},
 ) {
-  const prefix = (field: string) => `refunds.$.${field}`;
+  const prefix = (field: string) => `refunds.$[entry].${field}`;
   await Order.updateOne(
-    { _id: orderId, 'refunds.paymentId': paymentId },
+    { _id: orderId },
     {
       $set: Object.fromEntries(Object.entries(set).map(([key, value]) => [prefix(key), value])),
       ...(unset.length > 0 && { $unset: Object.fromEntries(unset.map((key) => [prefix(key), 1])) }),
+    },
+    {
+      arrayFilters: [
+        { 'entry.paymentId': paymentId, ...(onlyIfPending && { 'entry.status': 'pending' }) },
+      ],
     },
   );
 }
@@ -59,37 +70,40 @@ async function submitRefund(
         notes: { orderId, reason },
       }));
     const status = toRefundStatus(refund.status);
+    // The id is always recorded; the status only if no webhook has settled it in the meantime.
+    await updateRefund(orderId, paymentId, { razorpayRefundId: refund.id });
     await updateRefund(
       orderId,
       paymentId,
-      {
-        razorpayRefundId: refund.id,
-        status,
-        ...(status === 'processed' && { processedAt: new Date() }),
-      },
-      ['failureReason'],
+      { status, ...(status === 'processed' && { processedAt: new Date() }) },
+      { unset: ['failureReason'], onlyIfPending: true },
     );
   } catch (error) {
     logger.error({ err: error, orderId, paymentId }, 'Razorpay refund failed; an admin can retry');
-    await updateRefund(orderId, paymentId, {
-      status: 'failed',
-      failureReason: error instanceof Error ? error.message : 'Refund failed',
-    });
+    await updateRefund(
+      orderId,
+      paymentId,
+      { status: 'failed', failureReason: error instanceof Error ? error.message : 'Refund failed' },
+      { onlyIfPending: true },
+    );
   }
   return findRefund(orderId, paymentId);
 }
 
-/**
- * Refunds one payment in full. Idempotent per payment: the first caller claims it by adding a
- * 'pending' entry; anyone else (double click, concurrent cancel) gets that same entry back.
- */
-export async function refundPayment(params: {
+type RefundRequest = {
   orderId: string;
   paymentId: string;
   amount: number;
   reason: RefundReason;
-}): Promise<RefundRecord> {
-  const { orderId, paymentId, amount, reason } = params;
+};
+
+/**
+ * Records that this payment must be refunded (a 'pending' entry), once per payment. Pass the
+ * session to claim it in the same transaction as the cancel/refund that requires it, so the
+ * obligation can never be lost between the two. Returns false if it was already claimed.
+ */
+export async function claimRefund(request: RefundRequest, session?: ClientSession) {
+  const { orderId, paymentId, amount, reason } = request;
   const claimed = await Order.updateOne(
     { _id: orderId, 'refunds.paymentId': { $ne: paymentId } },
     {
@@ -97,20 +111,59 @@ export async function refundPayment(params: {
         refunds: { paymentId, amount, status: 'pending', reason, requestedAt: new Date() },
       },
     },
+    { session },
   );
-  if (claimed.modifiedCount === 0) return findRefund(orderId, paymentId);
-  return submitRefund(orderId, paymentId, amount, reason);
+  return claimed.modifiedCount === 1;
 }
 
+/** Sends an already-claimed refund to Razorpay (after the claiming transaction commits). */
+export async function submitClaimedRefund(orderId: string, paymentId: string) {
+  const entry = await findRefund(orderId, paymentId);
+  return submitRefund(orderId, paymentId, entry.amount, entry.reason);
+}
+
+/**
+ * Refunds one payment in full. Idempotent per payment: the first caller claims it by adding a
+ * 'pending' entry; anyone else (double click, concurrent cancel) gets that same entry back.
+ */
+export async function refundPayment(request: RefundRequest): Promise<RefundRecord> {
+  if (!(await claimRefund(request))) return findRefund(request.orderId, request.paymentId);
+  return submitRefund(request.orderId, request.paymentId, request.amount, request.reason);
+}
+
+/** A 'pending' entry that never reached Razorpay this long after the claim was interrupted. */
+const stalePendingMs = 5 * 60_000;
+
+/**
+ * Admin retry of a failed refund, or of one stuck 'pending' because the process stopped before
+ * calling Razorpay. Safe either way: submitRefund reuses any refund Razorpay already has.
+ */
 export async function retryFailedRefund(orderId: string, paymentId: string) {
+  const staleBefore = new Date(Date.now() - stalePendingMs);
   const claimed = await Order.findOneAndUpdate(
-    { _id: orderId, refunds: { $elemMatch: { paymentId, status: 'failed' } } },
-    { $set: { 'refunds.$.status': 'pending' } },
+    {
+      _id: orderId,
+      refunds: {
+        $elemMatch: {
+          paymentId,
+          $or: [
+            { status: 'failed' },
+            {
+              status: 'pending',
+              razorpayRefundId: { $exists: false },
+              requestedAt: { $lt: staleBefore },
+            },
+          ],
+        },
+      },
+    },
+    // Re-arming requestedAt stops a second concurrent retry from also claiming it.
+    { $set: { 'refunds.$.status': 'pending', 'refunds.$.requestedAt': new Date() } },
     { new: true },
   ).lean();
   const entry = claimed?.refunds.find((refund) => refund.paymentId === paymentId);
   if (!entry) {
-    throw new ConflictError('Only failed refunds can be retried', 'REFUND_NOT_RETRYABLE');
+    throw new ConflictError('Only failed or stuck refunds can be retried', 'REFUND_NOT_RETRYABLE');
   }
   return submitRefund(orderId, paymentId, entry.amount, entry.reason);
 }

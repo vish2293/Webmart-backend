@@ -4,6 +4,8 @@ export class AppError extends Error {
     readonly statusCode: number,
     readonly code: string,
     message: string,
+    /** Optional machine-readable context for clients (must be safe to expose). */
+    readonly details?: unknown,
   ) {
     super(message);
     this.name = new.target.name;
@@ -35,8 +37,8 @@ export class NotFoundError extends AppError {
 }
 
 export class ConflictError extends AppError {
-  constructor(message: string, code = 'CONFLICT') {
-    super(409, code, message);
+  constructor(message: string, code = 'CONFLICT', details?: unknown) {
+    super(409, code, message, details);
   }
 }
 

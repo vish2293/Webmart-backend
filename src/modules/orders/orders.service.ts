@@ -1,6 +1,7 @@
 import { Types, type ClientSession } from 'mongoose';
 import { isDuplicateKeyError, withTransaction } from '../../lib/db.js';
 import { ConflictError, ForbiddenError, NotFoundError } from '../../lib/errors.js';
+import { claimMembershipBenefit, isMembershipActive } from '../memberships/memberships.service.js';
 import { Product } from '../products/product.model.js';
 import {
   claimFirstOrderDiscount,
@@ -10,8 +11,31 @@ import {
 import { User } from '../users/user.model.js';
 import type { AuthenticatedUser } from '../users/users.types.js';
 import { notCancelled, Order, type OrderItemRecord } from './order.model.js';
-import { priceOrder, type OrderPricing } from './order-pricing.js';
+import {
+  estimatedDeliveryDate,
+  priceOrder,
+  type DeliveryOption,
+  type OrderPricing,
+} from './order-pricing.js';
 import type { CreateOrderInput, QuoteOrderInput } from './orders.validation.js';
+
+/** One line of an INSUFFICIENT_STOCK error, so the client can say exactly what changed. */
+type StockShortage = { productId: string; name: string; requested: number; available: number };
+
+/**
+ * Thrown when stock can't cover the order — typically because another customer's order took
+ * the last units first. Lists every short item so the customer sees all changes at once.
+ */
+function insufficientStockError(shortages: StockShortage[]) {
+  const [only] = shortages;
+  const message =
+    shortages.length === 1 && only
+      ? only.available === 0
+        ? `${only.name} just sold out.`
+        : `Only ${only.available} of ${only.name} left in stock.`
+      : 'Some items in your cart just sold out or are running low.';
+  return new ConflictError(message, 'INSUFFICIENT_STOCK', { items: shortages });
+}
 
 /** Unpaid, undelivered orders a customer may hold at once; stops stock hoarding. */
 const maxOpenOrdersPerUser = 5;
@@ -26,7 +50,8 @@ async function buildOrderItems(
     .lean();
   const productsById = new Map(products.map((product) => [product._id.toString(), product]));
 
-  return input.map((item) => {
+  const shortages: StockShortage[] = [];
+  const items = input.map((item) => {
     const product = productsById.get(item.product);
     if (!product) {
       throw new ConflictError(
@@ -35,12 +60,12 @@ async function buildOrderItems(
       );
     }
     if (product.countInStock < item.qty) {
-      throw new ConflictError(
-        product.countInStock === 0
-          ? `${product.name} is out of stock`
-          : `Only ${product.countInStock} of ${product.name} left in stock`,
-        'INSUFFICIENT_STOCK',
-      );
+      shortages.push({
+        productId: product._id.toString(),
+        name: product.name,
+        requested: item.qty,
+        available: Math.max(product.countInStock, 0),
+      });
     }
     return {
       product: product._id,
@@ -50,6 +75,8 @@ async function buildOrderItems(
       qty: item.qty,
     };
   });
+  if (shortages.length > 0) throw insufficientStockError(shortages);
+  return items;
 }
 
 /** Same lock order in every transaction keeps write conflicts (and driver retries) rare. */
@@ -70,7 +97,19 @@ export async function reserveStock(items: OrderItemRecord[], session: ClientSess
       { session },
     );
     if (result.modifiedCount === 0) {
-      throw new ConflictError(`Not enough stock for ${item.name}`, 'INSUFFICIENT_STOCK');
+      // Lost the race for this product: report the live level so the customer sees real numbers.
+      const current = await Product.findById(item.product)
+        .select('countInStock')
+        .session(session)
+        .lean();
+      throw insufficientStockError([
+        {
+          productId: item.product.toString(),
+          name: item.name,
+          requested: item.qty,
+          available: Math.max(current?.countInStock ?? 0, 0),
+        },
+      ]);
     }
   }
 }
@@ -136,7 +175,13 @@ export async function createOrder(
     const order = await withTransaction(async (session) => {
       const orderId = new Types.ObjectId();
       const orderItems = await buildOrderItems(input.orderItems, session);
-      const pricing = await priceForUser(userId, orderItems, input.pointsToRedeem, session);
+      const pricing = await priceForUser(
+        userId,
+        orderItems,
+        input.pointsToRedeem,
+        input.deliveryOption,
+        session,
+      );
       assertTotalUnchanged(input.totalPrice, pricing.totalPrice);
 
       // Both claims are guarded writes on the user document: a concurrent checkout by the same
@@ -144,6 +189,13 @@ export async function createOrder(
       if (pricing.firstOrderDiscount > 0 && !(await claimFirstOrderDiscount(userId, session))) {
         throw new ConflictError(
           'Your first-order discount was already used. Please review your order.',
+          'PRICE_CHANGED',
+        );
+      }
+      // Counts the order against the membership, which also blocks a refund racing this order.
+      if (pricing.memberBenefitsApplied && !(await claimMembershipBenefit(userId, session))) {
+        throw new ConflictError(
+          'Your Plus membership changed. Please review your order.',
           'PRICE_CHANGED',
         );
       }
@@ -159,6 +211,8 @@ export async function createOrder(
             shippingAddress: input.shippingAddress,
             paymentMethod: input.paymentMethod,
             idempotencyKey,
+            deliveryOption: input.deliveryOption,
+            estimatedDeliveryDate: estimatedDeliveryDate(input.deliveryOption),
             // `maxRedeemablePoints` is display-only; strict schema mode drops it.
             ...pricing,
           },
@@ -183,18 +237,20 @@ async function priceForUser(
   userId: string,
   orderItems: OrderItemRecord[],
   pointsRequested: number,
+  deliveryOption: DeliveryOption,
   session?: ClientSession,
 ): Promise<OrderPricing> {
-  const [isEligible, user] = await Promise.all([
-    isFirstOrderEligible(userId, session),
-    User.findById(userId)
-      .select('pointsBalance')
-      .session(session ?? null)
-      .lean(),
-  ]);
+  // Sequential on purpose: one transaction session must not run operations in parallel.
+  const isEligible = await isFirstOrderEligible(userId, session);
+  const user = await User.findById(userId)
+    .select('pointsBalance membershipEndsAt')
+    .session(session ?? null)
+    .lean();
   return priceOrder({
     items: orderItems,
     isFirstOrderEligible: isEligible,
+    isMember: isMembershipActive(user?.membershipEndsAt),
+    deliveryOption,
     pointsRequested,
     pointsBalance: user?.pointsBalance ?? 0,
   });
@@ -203,7 +259,7 @@ async function priceForUser(
 /** What checkout would charge right now; the same numbers `createOrder` will use. */
 export async function quoteOrder(userId: string, input: QuoteOrderInput): Promise<OrderPricing> {
   const orderItems = await buildOrderItems(input.orderItems);
-  return priceForUser(userId, orderItems, input.pointsToRedeem);
+  return priceForUser(userId, orderItems, input.pointsToRedeem, input.deliveryOption);
 }
 
 type PopulatedOrderUser = { _id: Types.ObjectId; name: string; email: string } | null;

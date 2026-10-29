@@ -23,7 +23,11 @@ function isBodyParserError(error: unknown): error is { status: number; type: str
 
 function toResponse(error: unknown): { status: number; body: Omit<ErrorBody, 'requestId'> } {
   if (error instanceof AppError) {
-    return { status: error.statusCode, body: { message: error.message, code: error.code } };
+    const body = { message: error.message, code: error.code };
+    return {
+      status: error.statusCode,
+      body: error.details === undefined ? body : { ...body, details: error.details },
+    };
   }
   if (error instanceof ZodError) {
     const details = error.issues.map((issue) => ({

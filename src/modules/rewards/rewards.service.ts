@@ -59,7 +59,8 @@ export async function spendPoints(
   session: ClientSession,
   type: 'redeem' | 'revive_redeem' = 'redeem',
 ) {
-  if (points <= 0) return;
+  // Also skips undefined/NaN from orders created before points existed.
+  if (!(points > 0)) return;
   const result = await User.updateOne(
     { _id: userId, pointsBalance: { $gte: points } },
     { $inc: { pointsBalance: -points } },
@@ -94,21 +95,57 @@ export async function returnSpentPoints(userId: string, orderId: string, session
   return 0;
 }
 
-export async function creditEarnedPoints(
+async function creditPoints(
+  userId: string,
+  orderId: string,
+  type: PointsTransactionType,
+  points: number,
+  session: ClientSession,
+) {
+  if (points <= 0 || (await findEntry(orderId, type, session))) return;
+  await User.updateOne({ _id: userId }, { $inc: { pointsBalance: points } }, { session });
+  await writeEntry(userId, orderId, type, points, session);
+}
+
+export function creditEarnedPoints(
   userId: string,
   orderId: string,
   points: number,
   session: ClientSession,
 ) {
-  if (points <= 0 || (await findEntry(orderId, 'earn', session))) return;
-  await User.updateOne({ _id: userId }, { $inc: { pointsBalance: points } }, { session });
-  await writeEntry(userId, orderId, 'earn', points, session);
+  return creditPoints(userId, orderId, 'earn', points, session);
+}
+
+/** Plus welcome bonus; `membershipId` takes the ledger's `order` slot. Once per membership. */
+export function creditMembershipBonus(
+  userId: string,
+  membershipId: string,
+  points: number,
+  session: ClientSession,
+) {
+  return creditPoints(userId, membershipId, 'membership_bonus', points, session);
+}
+
+export function revokeMembershipBonus(
+  userId: string,
+  membershipId: string,
+  session: ClientSession,
+) {
+  return revokeEarnedPoints(userId, membershipId, session, [
+    'membership_bonus',
+    'membership_bonus_revoke',
+  ]);
 }
 
 /** Takes back points earned on a refunded order, flooring the balance at zero. */
-export async function revokeEarnedPoints(userId: string, orderId: string, session: ClientSession) {
-  const earned = await findEntry(orderId, 'earn', session);
-  if (!earned || (await findEntry(orderId, 'earn_revoke', session))) {
+export async function revokeEarnedPoints(
+  userId: string,
+  orderId: string,
+  session: ClientSession,
+  [earnType, revokeType]: [PointsTransactionType, PointsTransactionType] = ['earn', 'earn_revoke'],
+) {
+  const earned = await findEntry(orderId, earnType, session);
+  if (!earned || (await findEntry(orderId, revokeType, session))) {
     return { revoked: 0, shortfall: 0 };
   }
   const user = await User.findById(userId).select('pointsBalance').session(session).lean();
@@ -117,7 +154,7 @@ export async function revokeEarnedPoints(userId: string, orderId: string, sessio
   const revoked = Math.min(earned.points, user.pointsBalance);
   const shortfall = earned.points - revoked;
   await User.updateOne({ _id: userId }, { $inc: { pointsBalance: -revoked } }, { session });
-  await writeEntry(userId, orderId, 'earn_revoke', -revoked, session, shortfall);
+  await writeEntry(userId, orderId, revokeType, -revoked, session, shortfall);
   return { revoked, shortfall };
 }
 

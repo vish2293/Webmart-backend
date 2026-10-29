@@ -16,14 +16,18 @@ import {
   type RefundReason,
 } from './order.model.js';
 import { pointsEarnedFor } from './order-pricing.js';
-import { recordManualRefund, refundPayment } from './order-refunds.service.js';
+import { claimRefund, recordManualRefund, submitClaimedRefund } from './order-refunds.service.js';
 import { releaseStock } from './orders.service.js';
 import type { MarkPaidInput } from './orders.validation.js';
 
 type LifecycleAction = 'cancel' | 'ship' | 'deliver' | 'pay' | 'refund';
 
 const notRefunded = { refundedAt: { $exists: false } } as const;
-const notShipped = { isShipped: { $ne: true } } as const;
+// Orders delivered before the shipped step existed have no `isShipped`; delivered implies shipped.
+const notShipped = { isShipped: { $ne: true }, isDelivered: { $ne: true } } as const;
+const hasShipped = { $or: [{ isShipped: true }, { isDelivered: true }] };
+const isOrderShipped = (order: Pick<OrderRecord, 'isShipped' | 'isDelivered'>) =>
+  order.isShipped === true || order.isDelivered === true;
 
 /**
  * Every transition is a guarded update; when the guard misses, this turns the order's actual
@@ -39,7 +43,7 @@ function explainBlocked(order: OrderRecord | null, action: LifecycleAction): nev
   }
   switch (action) {
     case 'cancel':
-      if (order.isShipped) {
+      if (isOrderShipped(order)) {
         throw new ConflictError(
           'This order has already shipped and can no longer be cancelled',
           'ORDER_ALREADY_SHIPPED',
@@ -47,8 +51,9 @@ function explainBlocked(order: OrderRecord | null, action: LifecycleAction): nev
       }
       break;
     case 'ship':
-      if (order.isShipped)
+      if (isOrderShipped(order)) {
         throw new ConflictError('Order is already shipped', 'ORDER_ALREADY_SHIPPED');
+      }
       if (!order.isPaid) {
         throw new ConflictError('Online orders must be paid before shipping', 'ORDER_NOT_PAID');
       }
@@ -102,18 +107,27 @@ export function cancelUnpaidOrder(orderId: string) {
   });
 }
 
-/** Gives the money back for a paid order: through Razorpay, or flagged for cash orders. */
-async function returnPayment(order: OrderRecord, reason: RefundReason) {
-  if (!order.isPaid) return;
+/**
+ * Records, inside the caller's transaction, that a paid order's money must go back: a pending
+ * Razorpay refund, or a manual one for cash. Returns the payment to submit after commit, if any.
+ */
+async function claimPaymentReturn(
+  order: OrderRecord,
+  reason: RefundReason,
+  session: ClientSession,
+) {
+  if (!order.isPaid) return null;
   const orderId = order._id.toString();
   const paymentId = order.paymentResult?.id;
   // Cash collected on delivery (or an admin-confirmed payment with no Razorpay id) can't go
   // back through the gateway.
   if (order.paymentMethod === 'Cash on Delivery' || !paymentId?.startsWith('pay_')) {
-    await recordManualRefund(orderId, order.totalPrice, reason);
-    return;
+    await recordManualRefund(orderId, order.totalPrice, reason, session);
+    return null;
   }
-  await refundPayment({ orderId, paymentId, amount: order.totalPrice, reason });
+  return (await claimRefund({ orderId, paymentId, amount: order.totalPrice, reason }, session))
+    ? paymentId
+    : null;
 }
 
 async function reloadOrder(orderId: string) {
@@ -129,17 +143,24 @@ export async function cancelOrder(
   refundReason?: RefundReason,
 ) {
   const isAdmin = actor.role === 'admin';
-  const cancelled = await withTransaction(async (session) => {
+  const paymentToRefund = await withTransaction(async (session) => {
     const order = await Order.findById(orderId).session(session).lean();
     if (!order) throw new NotFoundError('Order not found', 'ORDER_NOT_FOUND');
     if (!isAdmin && order.user.toString() !== actor.id) {
       throw new ForbiddenError('You can only cancel your own orders', 'ORDER_FORBIDDEN');
     }
-    const result = await cancelOrderInTransaction(order, isAdmin ? 'admin' : 'customer', session);
-    return result ?? explainBlocked(order, 'cancel');
+    const cancelled = await cancelOrderInTransaction(
+      order,
+      isAdmin ? 'admin' : 'customer',
+      session,
+    );
+    if (!cancelled) return explainBlocked(order, 'cancel');
+    const reason = refundReason ?? (isAdmin ? 'admin_cancel' : 'customer_cancel');
+    return claimPaymentReturn(cancelled, reason, session);
   });
 
-  await returnPayment(cancelled, refundReason ?? (isAdmin ? 'admin_cancel' : 'customer_cancel'));
+  // Razorpay is called only after the cancel and the refund claim committed together.
+  if (paymentToRefund) await submitClaimedRefund(orderId, paymentToRefund);
   return reloadOrder(orderId);
 }
 
@@ -164,7 +185,7 @@ async function awardPointsIfComplete(order: OrderRecord, session: ClientSession)
   if (!order.isPaid || !order.isDelivered || order.isCancelled || order.refundedAt) return order;
   if (order.pointsEarnedAt) return order;
 
-  const points = pointsEarnedFor(order.totalPrice);
+  const points = pointsEarnedFor(order.totalPrice, order.pointsMultiplier ?? 1);
   const awarded = await Order.findOneAndUpdate(
     { _id: order._id, pointsEarnedAt: { $exists: false } },
     { pointsEarned: points, pointsEarnedAt: new Date() },
@@ -216,13 +237,13 @@ export function markOrderPaid(orderId: string, payment: MarkPaidInput) {
  */
 export async function refundOrder(orderId: string, admin: AuthenticatedUser) {
   const order = await reloadOrder(orderId);
-  if (!order.isShipped && !order.isCancelled && !order.refundedAt && order.isPaid) {
+  if (!isOrderShipped(order) && !order.isCancelled && !order.refundedAt && order.isPaid) {
     return cancelOrder(orderId, admin, 'admin_refund');
   }
 
-  const refunded = await withTransaction(async (session) => {
+  const paymentToRefund = await withTransaction(async (session) => {
     const updated = await Order.findOneAndUpdate(
-      { _id: orderId, isPaid: true, isShipped: true, ...notCancelled, ...notRefunded },
+      { _id: orderId, isPaid: true, ...hasShipped, ...notCancelled, ...notRefunded },
       { refundedAt: new Date() },
       { new: true, session },
     ).lean();
@@ -232,9 +253,9 @@ export async function refundOrder(orderId: string, admin: AuthenticatedUser) {
     const userId = updated.user.toString();
     await returnSpentPoints(userId, orderId, session);
     await revokeEarnedPoints(userId, orderId, session);
-    return updated;
+    return claimPaymentReturn(updated, 'admin_refund', session);
   });
 
-  await returnPayment(refunded, 'admin_refund');
+  if (paymentToRefund) await submitClaimedRefund(orderId, paymentToRefund);
   return reloadOrder(orderId);
 }

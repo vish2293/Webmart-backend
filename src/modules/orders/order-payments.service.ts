@@ -9,6 +9,8 @@ import { withTransaction } from '../../lib/db.js';
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../../lib/errors.js';
 import { logger } from '../../lib/logger.js';
 import type { AuthenticatedUser } from '../users/users.types.js';
+import { applyMembershipRefundWebhook } from '../memberships/membership-refunds.service.js';
+import { handleMembershipPaymentEvent } from '../memberships/memberships.service.js';
 import { claimFirstOrderDiscount, spendPoints } from '../rewards/rewards.service.js';
 import { notCancelled, Order, type OrderRecord } from './order.model.js';
 import { toPaise } from './order-pricing.js';
@@ -72,8 +74,11 @@ function reviveExpiredOrder(orderId: string, payment: ReceivedPayment) {
 
     const userId = revived.user.toString();
     await reserveStock(revived.orderItems, session);
-    await spendPoints(userId, orderId, revived.pointsRedeemed, session, 'revive_redeem');
-    if (revived.firstOrderDiscount > 0 && !(await claimFirstOrderDiscount(userId, session))) {
+    await spendPoints(userId, orderId, revived.pointsRedeemed ?? 0, session, 'revive_redeem');
+    if (
+      (revived.firstOrderDiscount ?? 0) > 0 &&
+      !(await claimFirstOrderDiscount(userId, session))
+    ) {
       throw new ConflictError('First-order discount already used', 'DISCOUNT_UNAVAILABLE');
     }
     return revived;
@@ -252,12 +257,14 @@ export async function verifyRazorpayPayment(
 export async function handleRazorpayWebhookEvent(event: RazorpayWebhookEvent) {
   const refund = event.payload.refund?.entity;
   if (refund && (event.event === 'refund.processed' || event.event === 'refund.failed')) {
+    if (await applyMembershipRefundWebhook(refund, event.event)) return;
     await applyRefundWebhook(refund, event.event);
     return;
   }
 
   const payment = event.payload.payment?.entity;
   if (!paidEvents.has(event.event) || !payment?.order_id) return;
+  if (await handleMembershipPaymentEvent({ ...payment, order_id: payment.order_id })) return;
 
   const order = await Order.findOne({ razorpayOrderId: payment.order_id })
     .select('totalPrice')

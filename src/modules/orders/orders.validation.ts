@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { objectIdSchema } from '../../lib/validation.js';
+import { deliveryOptions } from './order-pricing.js';
 
 export const paymentMethods = ['UPI', 'Card', 'Cash on Delivery'] as const;
 export type PaymentMethod = (typeof paymentMethods)[number];
@@ -36,11 +37,16 @@ export const createOrderSchema = z.object({
     country: addressLine(100),
   }),
   paymentMethod: z.enum(paymentMethods),
+  deliveryOption: z.enum(deliveryOptions).default('standard'),
   /** Points the customer chose to use; the server caps it to what's allowed. */
   pointsToRedeem: z.number().int().min(0).max(1_000_000).default(0),
 });
 
-export const quoteOrderSchema = createOrderSchema.pick({ orderItems: true, pointsToRedeem: true });
+export const quoteOrderSchema = createOrderSchema.pick({
+  orderItems: true,
+  pointsToRedeem: true,
+  deliveryOption: true,
+});
 
 const paymentField = z.string().trim().max(200).optional();
 

@@ -16,6 +16,8 @@ export interface UserRecord {
   pointsBalance: number;
   /** Set when an order used the first-order discount; cleared if that order is cancelled. */
   firstOrderDiscountUsedAt?: Date;
+  /** Plus benefits apply while this is in the future. Only changed with a Membership update. */
+  membershipEndsAt?: Date;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -30,6 +32,7 @@ const userSchema = new Schema<UserRecord>(
     passwordChangedAt: Date,
     pointsBalance: { type: Number, required: true, default: 0, min: 0 },
     firstOrderDiscountUsedAt: Date,
+    membershipEndsAt: Date,
   },
   { timestamps: true },
 );

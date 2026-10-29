@@ -5,6 +5,9 @@ import { model, Schema, type Types } from 'mongoose';
  * - redeem / redeem_return: spent at checkout; returned on cancel or refund.
  * - revive_redeem / revive_return: the same pair again for an expired order that a late payment
  *   brought back (an order can be revived at most once).
+ * - membership_bonus / membership_bonus_revoke: the Plus welcome bonus and its removal on refund.
+ *   For these two types `order` holds the membership id, so the (order, type) index keeps
+ *   them once-only too.
  */
 export const pointsTransactionTypes = [
   'earn',
@@ -13,6 +16,8 @@ export const pointsTransactionTypes = [
   'redeem_return',
   'revive_redeem',
   'revive_return',
+  'membership_bonus',
+  'membership_bonus_revoke',
 ] as const;
 export type PointsTransactionType = (typeof pointsTransactionTypes)[number];
 

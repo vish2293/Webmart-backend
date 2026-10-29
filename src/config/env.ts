@@ -38,6 +38,8 @@ const envSchema = z.object({
     .min(5)
     .max(24 * 60)
     .default(30),
+  /** Enables GET /api/cron/expire-orders (Vercel Cron). Leave unset to keep it disabled. */
+  CRON_SECRET: z.string().min(16, 'CRON_SECRET must be at least 16 characters').optional(),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
 });
 
