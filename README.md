@@ -1,4 +1,4 @@
-# IndiaKart — Server
+# WebMart — Server
 
 Express 5 + TypeScript (strict, ESM) + MongoDB (Mongoose). Follows
 [`expresscodingstandard.md`](./expresscodingstandard.md).

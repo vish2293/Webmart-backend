@@ -3,7 +3,7 @@
  * only inserted when missing, so admin edits (price, stock) are never overwritten.
  *
  * Products must reference an admin. If none exists, one is created with SEED_ADMIN_EMAIL
- * (default admin@indiakart.com) and a random password that is printed once.
+ * (default admin@webmart.com) and a random password that is printed once.
  *
  *   npm run seed:products
  */
@@ -18,7 +18,7 @@ async function findOrCreateAdmin() {
   const admin = await User.findOne({ role: 'admin' }).select('_id email').lean();
   if (admin) return admin._id;
 
-  const email = process.env.SEED_ADMIN_EMAIL ?? 'admin@indiakart.com';
+  const email = process.env.SEED_ADMIN_EMAIL ?? 'admin@webmart.com';
   const password = randomBytes(12).toString('base64url');
   const created = await User.create({ name: 'Store Admin', email, password, role: 'admin' });
 
