@@ -98,6 +98,59 @@ export async function fetchRazorpayOrderPayments(
   return result.items;
 }
 
+const razorpayPaymentSchema = z.object({
+  id: z.string(),
+  status: z.string(),
+  amount: z.number(),
+  method: z.string(),
+  email: z.string().nullish(),
+  order_id: z.string().nullable(),
+});
+
+export type RazorpayPaymentDetails = z.infer<typeof razorpayPaymentSchema>;
+
+/** One payment's current state (captured/authorized/failed…), amount and method. */
+export function fetchRazorpayPayment(paymentId: string): Promise<RazorpayPaymentDetails> {
+  return razorpayRequest(`/payments/${encodeURIComponent(paymentId)}`, razorpayPaymentSchema, {
+    method: 'GET',
+    failureMessage: 'Could not check payment status',
+  });
+}
+
+const razorpayRefundSchema = z.object({ id: z.string(), status: z.string(), amount: z.number() });
+
+export type RazorpayRefund = z.infer<typeof razorpayRefundSchema>;
+
+/**
+ * Refunds (part of) a captured payment. Not retried here: a retry after a timeout could refund
+ * twice. Callers check `listRazorpayPaymentRefunds` before trying again.
+ */
+export function createRazorpayRefund(input: {
+  paymentId: string;
+  amountInPaise: number;
+  notes: Record<string, string>;
+}): Promise<RazorpayRefund> {
+  return razorpayRequest(
+    `/payments/${encodeURIComponent(input.paymentId)}/refund`,
+    razorpayRefundSchema,
+    {
+      method: 'POST',
+      body: { amount: input.amountInPaise, notes: input.notes },
+      failureMessage: 'Could not refund payment',
+    },
+  );
+}
+
+/** Refunds already issued against a payment. Read-only, safe to retry. */
+export async function listRazorpayPaymentRefunds(paymentId: string): Promise<RazorpayRefund[]> {
+  const result = await razorpayRequest(
+    `/payments/${encodeURIComponent(paymentId)}/refunds`,
+    z.object({ items: z.array(razorpayRefundSchema) }),
+    { method: 'GET', failureMessage: 'Could not check refund status' },
+  );
+  return result.items;
+}
+
 function hmacSha256Hex(secret: string, payload: string | Buffer) {
   return createHmac('sha256', secret).update(payload).digest('hex');
 }

@@ -36,7 +36,11 @@ export const createOrderSchema = z.object({
     country: addressLine(100),
   }),
   paymentMethod: z.enum(paymentMethods),
+  /** Points the customer chose to use; the server caps it to what's allowed. */
+  pointsToRedeem: z.number().int().min(0).max(1_000_000).default(0),
 });
+
+export const quoteOrderSchema = createOrderSchema.pick({ orderItems: true, pointsToRedeem: true });
 
 const paymentField = z.string().trim().max(200).optional();
 
@@ -50,6 +54,11 @@ export const markPaidSchema = z
   .default({});
 
 const razorpayId = z.string().trim().min(1).max(100);
+
+export const refundParamsSchema = z.object({
+  id: objectIdSchema,
+  paymentId: z.string().regex(/^pay_\w{1,60}$/, 'Invalid payment id'),
+});
 
 /** Field names match what Razorpay Checkout passes to its success handler. */
 export const verifyRazorpayPaymentSchema = z.object({
@@ -69,13 +78,20 @@ export const razorpayWebhookEventSchema = z.object({
           order_id: z.string().nullable(),
           amount: z.number(),
           email: z.string().nullish(),
+          method: z.string().nullish(),
         }),
+      })
+      .optional(),
+    refund: z
+      .object({
+        entity: z.object({ id: z.string(), payment_id: z.string() }),
       })
       .optional(),
   }),
 });
 
 export type CreateOrderInput = z.infer<typeof createOrderSchema>;
+export type QuoteOrderInput = z.infer<typeof quoteOrderSchema>;
 export type MarkPaidInput = z.infer<typeof markPaidSchema>;
 export type VerifyRazorpayPaymentInput = z.infer<typeof verifyRazorpayPaymentSchema>;
 export type RazorpayWebhookEvent = z.infer<typeof razorpayWebhookEventSchema>;

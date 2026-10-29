@@ -2,20 +2,24 @@ import { env } from '../../config/env.js';
 import {
   createRazorpayOrder,
   fetchRazorpayOrderPayments,
+  fetchRazorpayPayment,
   isValidPaymentSignature,
 } from '../../integrations/razorpay.js';
 import { withTransaction } from '../../lib/db.js';
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../../lib/errors.js';
 import { logger } from '../../lib/logger.js';
 import type { AuthenticatedUser } from '../users/users.types.js';
-import { notCancelled, Order } from './order.model.js';
+import { claimFirstOrderDiscount, spendPoints } from '../rewards/rewards.service.js';
+import { notCancelled, Order, type OrderRecord } from './order.model.js';
 import { toPaise } from './order-pricing.js';
-import { cancelUnpaidOrder, reserveStock } from './orders.service.js';
+import { applyRefundWebhook, refundPayment } from './order-refunds.service.js';
+import { cancelUnpaidOrder } from './order-lifecycle.service.js';
+import { reserveStock } from './orders.service.js';
 import type { RazorpayWebhookEvent, VerifyRazorpayPaymentInput } from './orders.validation.js';
 
 const paidEvents = new Set(['payment.captured', 'order.paid']);
 
-type ReceivedPayment = { id: string; email?: string };
+type ReceivedPayment = { id: string; email?: string; method?: string };
 
 const paymentDeadline = (createdAt: Date) =>
   new Date(createdAt.getTime() + env.ORDER_PAYMENT_WINDOW_MINUTES * 60_000);
@@ -28,6 +32,7 @@ const paidUpdate = (payment: ReceivedPayment) => ({
     status: 'captured',
     update_time: new Date().toISOString(),
     email_address: payment.email,
+    method: payment.method,
   },
 });
 
@@ -42,47 +47,90 @@ async function findPayableOrder(orderId: string, payer: AuthenticatedUser) {
   return order;
 }
 
-/**
- * A payment landed after the order expired and its stock was released. Take the stock back if
- * it's still there; otherwise the customer must be refunded.
- */
-async function reviveExpiredOrder(orderId: string, payment: ReceivedPayment) {
-  try {
-    return await withTransaction(async (session) => {
-      const revived = await Order.findOneAndUpdate(
-        { _id: orderId, isPaid: false, isCancelled: true },
-        { ...paidUpdate(payment), isCancelled: false, $unset: { cancelledAt: 1 } },
-        { new: true, session },
-      ).lean();
-      if (!revived) throw new ConflictError('Order changed concurrently', 'ORDER_CHANGED');
-      await reserveStock(revived.orderItems, session);
-      return revived;
-    });
-  } catch (error) {
-    if (!(error instanceof ConflictError) || error.code !== 'INSUFFICIENT_STOCK') throw error;
+/** Reasons a late payment can't bring an expired order back; the money is refunded instead. */
+const revivalBlockers = new Set(['INSUFFICIENT_STOCK', 'PRICE_CHANGED', 'DISCOUNT_UNAVAILABLE']);
 
-    // ponytail: refunds are manual — search logs/admin for status "refund_required". Automate
-    // with Razorpay's refund API if this happens often.
-    await Order.updateOne(
-      { _id: orderId, isPaid: false },
-      { paymentResult: { ...paidUpdate(payment).paymentResult, status: 'refund_required' } },
-    );
-    logger.error(
-      { orderId, paymentId: payment.id },
-      'Payment received for an expired order whose stock is gone; refund required',
-    );
-    throw new ConflictError(
-      'This order expired before your payment completed and the items are no longer available. Your payment will be refunded.',
-      'ORDER_EXPIRED',
-    );
+/** Codes for a late payment that was refunded; webhooks acknowledge these instead of retrying. */
+const latePaymentRefundedCodes = new Set(['ORDER_EXPIRED', 'ORDER_CANCELLED_REFUNDED']);
+
+/**
+ * Re-takes everything the expiry gave back — stock, the points spent and the first-order
+ * discount — in one transaction. Throws a ConflictError if any of it is gone.
+ */
+function reviveExpiredOrder(orderId: string, payment: ReceivedPayment) {
+  return withTransaction(async (session) => {
+    const revived = await Order.findOneAndUpdate(
+      { _id: orderId, isPaid: false, isCancelled: true },
+      {
+        ...paidUpdate(payment),
+        isCancelled: false,
+        $unset: { cancelledAt: 1, cancelReason: 1 },
+      },
+      { new: true, session },
+    ).lean();
+    if (!revived) throw new ConflictError('Order changed concurrently', 'ORDER_CHANGED');
+
+    const userId = revived.user.toString();
+    await reserveStock(revived.orderItems, session);
+    await spendPoints(userId, orderId, revived.pointsRedeemed, session, 'revive_redeem');
+    if (revived.firstOrderDiscount > 0 && !(await claimFirstOrderDiscount(userId, session))) {
+      throw new ConflictError('First-order discount already used', 'DISCOUNT_UNAVAILABLE');
+    }
+    return revived;
+  });
+}
+
+/**
+ * A payment landed on a cancelled, unpaid order. Orders that merely expired come back if
+ * everything they held can be re-taken; anything else (customer or admin cancelled, stock,
+ * points or discount gone) is refunded in full.
+ */
+async function handleLatePayment(
+  order: OrderRecord,
+  payment: ReceivedPayment,
+): Promise<OrderRecord> {
+  const orderId = order._id.toString();
+  // Orders cancelled before cancel reasons existed could only have expired.
+  const hasExpired = (order.cancelReason ?? 'payment_expired') === 'payment_expired';
+
+  if (hasExpired) {
+    try {
+      return await reviveExpiredOrder(orderId, payment);
+    } catch (error) {
+      if (error instanceof ConflictError && error.code === 'ORDER_CHANGED') {
+        // A concurrent call for this payment got there first; report its outcome.
+        return recordOnlinePayment(orderId, payment);
+      }
+      if (!(error instanceof ConflictError) || !revivalBlockers.has(error.code)) throw error;
+    }
   }
+
+  logger.warn({ orderId, paymentId: payment.id }, 'Late payment on a cancelled order; refunding');
+  await refundPayment({
+    orderId,
+    paymentId: payment.id,
+    amount: order.totalPrice,
+    reason: 'late_payment',
+  });
+  throw hasExpired
+    ? new ConflictError(
+        'This order expired before your payment completed and the items are no longer available. Your payment will be refunded.',
+        'ORDER_EXPIRED',
+      )
+    : new ConflictError(
+        'This order was cancelled before your payment completed. Your payment will be refunded.',
+        'ORDER_CANCELLED_REFUNDED',
+      );
 }
 
 /**
  * Marks the order paid once. Safe to call from the browser verify call, the webhook and the
  * expiry sweep, in any order; later calls return the already-paid order.
  */
-async function recordOnlinePayment(orderId: string, payment: ReceivedPayment) {
+async function recordOnlinePayment(
+  orderId: string,
+  payment: ReceivedPayment,
+): Promise<OrderRecord> {
   const paid = await Order.findOneAndUpdate(
     { _id: orderId, isPaid: false, ...notCancelled },
     paidUpdate(payment),
@@ -92,14 +140,21 @@ async function recordOnlinePayment(orderId: string, payment: ReceivedPayment) {
 
   const existing = await Order.findById(orderId).lean();
   if (!existing) throw new NotFoundError('Order not found', 'ORDER_NOT_FOUND');
-  if (!existing.isPaid && existing.isCancelled) return reviveExpiredOrder(orderId, payment);
+  if (!existing.isPaid && existing.isCancelled) return handleLatePayment(existing, payment);
 
   if (existing.paymentResult?.id !== payment.id) {
-    // Two different payments for one order: the customer was charged twice.
-    logger.error(
+    // Two different payments for one order: the customer was charged twice. Give one back.
+    logger.warn(
       { orderId, paymentId: payment.id, recordedPaymentId: existing.paymentResult?.id },
-      'Duplicate payment received for an already-paid order; refund required',
+      'Duplicate payment received for an already-paid order; refunding it',
     );
+    await refundPayment({
+      orderId,
+      paymentId: payment.id,
+      amount: existing.totalPrice,
+      reason: 'duplicate_payment',
+    });
+    return (await Order.findById(orderId).lean()) ?? existing;
   }
   return existing;
 }
@@ -169,11 +224,38 @@ export async function verifyRazorpayPayment(
     throw new BadRequestError('Payment verification failed', 'PAYMENT_SIGNATURE_INVALID');
   }
 
-  return recordOnlinePayment(orderId, { id: input.razorpay_payment_id, email: payer.email });
+  // The signature proves the payment belongs to this order; Razorpay itself confirms the money
+  // was actually captured, and for the full amount.
+  const payment = await fetchRazorpayPayment(input.razorpay_payment_id);
+  if (payment.amount !== toPaise(order.totalPrice)) {
+    throw new BadRequestError('Payment amount does not match this order', 'PAYMENT_NOT_CAPTURED');
+  }
+  if (payment.status === 'authorized') {
+    // The payment.captured webhook completes it.
+    throw new ConflictError(
+      'Payment received. We are confirming it with the bank; this page will update shortly.',
+      'PAYMENT_PENDING',
+    );
+  }
+  if (payment.status !== 'captured') {
+    throw new BadRequestError('Payment was not completed', 'PAYMENT_NOT_CAPTURED');
+  }
+
+  return recordOnlinePayment(orderId, {
+    id: payment.id,
+    email: payer.email,
+    method: payment.method,
+  });
 }
 
 /** Signature must already be verified. Unknown or irrelevant events are acknowledged and ignored. */
 export async function handleRazorpayWebhookEvent(event: RazorpayWebhookEvent) {
+  const refund = event.payload.refund?.entity;
+  if (refund && (event.event === 'refund.processed' || event.event === 'refund.failed')) {
+    await applyRefundWebhook(refund, event.event);
+    return;
+  }
+
   const payment = event.payload.payment?.entity;
   if (!paidEvents.has(event.event) || !payment?.order_id) return;
 
@@ -196,10 +278,11 @@ export async function handleRazorpayWebhookEvent(event: RazorpayWebhookEvent) {
     await recordOnlinePayment(order._id.toString(), {
       id: payment.id,
       email: payment.email ?? undefined,
+      method: payment.method ?? undefined,
     });
   } catch (error) {
     // Already logged for refund; retrying the webhook can't change the outcome.
-    if (error instanceof ConflictError && error.code === 'ORDER_EXPIRED') return;
+    if (error instanceof ConflictError && latePaymentRefundedCodes.has(error.code)) return;
     throw error;
   }
 }

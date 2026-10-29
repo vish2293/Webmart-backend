@@ -12,6 +12,10 @@ export interface UserRecord {
   role: UserRole;
   /** Tokens issued before this are rejected, so a password change logs out other sessions. */
   passwordChangedAt?: Date;
+  /** Spendable reward points; only changed alongside a PointsTransaction row. */
+  pointsBalance: number;
+  /** Set when an order used the first-order discount; cleared if that order is cancelled. */
+  firstOrderDiscountUsedAt?: Date;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -24,6 +28,8 @@ const userSchema = new Schema<UserRecord>(
     password: { type: String, required: true, select: false },
     role: { type: String, required: true, enum: ['user', 'admin'], default: 'user' },
     passwordChangedAt: Date,
+    pointsBalance: { type: Number, required: true, default: 0, min: 0 },
+    firstOrderDiscountUsedAt: Date,
   },
   { timestamps: true },
 );

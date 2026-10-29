@@ -3,6 +3,7 @@ import { isDatabaseReady } from '../lib/db.js';
 import { handleRazorpayWebhook } from '../modules/orders/orders.controller.js';
 import { ordersRouter } from '../modules/orders/orders.routes.js';
 import { productsRouter } from '../modules/products/products.routes.js';
+import { rewardsRouter } from '../modules/rewards/rewards.routes.js';
 import { usersRouter } from '../modules/users/users.routes.js';
 
 export const apiRouter = Router();
@@ -10,6 +11,7 @@ export const apiRouter = Router();
 apiRouter.use('/products', productsRouter);
 apiRouter.use('/users', usersRouter);
 apiRouter.use('/orders', ordersRouter);
+apiRouter.use('/rewards', rewardsRouter);
 
 /** Must be mounted before `express.json()`: signature checks need the raw body. */
 export const webhooksRouter = Router();

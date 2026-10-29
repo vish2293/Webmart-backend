@@ -3,15 +3,24 @@ import { idParamsSchema } from '../../lib/validation.js';
 import { getAuthenticatedUser } from '../../middleware/authenticate.js';
 import { isValidWebhookSignature } from '../../integrations/razorpay.js';
 import { BadRequestError } from '../../lib/errors.js';
+import * as orderLifecycle from './order-lifecycle.service.js';
 import * as orderPaymentsService from './order-payments.service.js';
+import * as orderRefunds from './order-refunds.service.js';
 import * as ordersService from './orders.service.js';
 import {
   createOrderSchema,
   idempotencyKeySchema,
   markPaidSchema,
+  quoteOrderSchema,
   razorpayWebhookEventSchema,
+  refundParamsSchema,
   verifyRazorpayPaymentSchema,
 } from './orders.validation.js';
+
+export async function quoteOrder(req: Request, res: Response) {
+  const input = quoteOrderSchema.parse(req.body);
+  res.json(await ordersService.quoteOrder(getAuthenticatedUser(req).id, input));
+}
 
 export async function startRazorpayPayment(req: Request, res: Response) {
   const { id } = idParamsSchema.parse(req.params);
@@ -71,10 +80,30 @@ export async function listAllOrders(_req: Request, res: Response) {
 
 export async function markOrderPaid(req: Request, res: Response) {
   const { id } = idParamsSchema.parse(req.params);
-  res.json(await ordersService.markOrderPaid(id, markPaidSchema.parse(req.body)));
+  res.json(await orderLifecycle.markOrderPaid(id, markPaidSchema.parse(req.body)));
 }
 
 export async function markOrderDelivered(req: Request, res: Response) {
   const { id } = idParamsSchema.parse(req.params);
-  res.json(await ordersService.markOrderDelivered(id));
+  res.json(await orderLifecycle.markOrderDelivered(id));
+}
+
+export async function shipOrder(req: Request, res: Response) {
+  const { id } = idParamsSchema.parse(req.params);
+  res.json(await orderLifecycle.shipOrder(id));
+}
+
+export async function cancelOrder(req: Request, res: Response) {
+  const { id } = idParamsSchema.parse(req.params);
+  res.json(await orderLifecycle.cancelOrder(id, getAuthenticatedUser(req)));
+}
+
+export async function refundOrder(req: Request, res: Response) {
+  const { id } = idParamsSchema.parse(req.params);
+  res.json(await orderLifecycle.refundOrder(id, getAuthenticatedUser(req)));
+}
+
+export async function retryRefund(req: Request, res: Response) {
+  const { id, paymentId } = refundParamsSchema.parse(req.params);
+  res.json(await orderRefunds.retryFailedRefund(id, paymentId));
 }

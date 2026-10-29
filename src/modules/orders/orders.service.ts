@@ -1,22 +1,28 @@
-import type { ClientSession, Types } from 'mongoose';
+import { Types, type ClientSession } from 'mongoose';
 import { isDuplicateKeyError, withTransaction } from '../../lib/db.js';
 import { ConflictError, ForbiddenError, NotFoundError } from '../../lib/errors.js';
 import { Product } from '../products/product.model.js';
+import {
+  claimFirstOrderDiscount,
+  isFirstOrderEligible,
+  spendPoints,
+} from '../rewards/rewards.service.js';
+import { User } from '../users/user.model.js';
 import type { AuthenticatedUser } from '../users/users.types.js';
 import { notCancelled, Order, type OrderItemRecord } from './order.model.js';
-import { calculateOrderPricing } from './order-pricing.js';
-import type { CreateOrderInput, MarkPaidInput } from './orders.validation.js';
+import { priceOrder, type OrderPricing } from './order-pricing.js';
+import type { CreateOrderInput, QuoteOrderInput } from './orders.validation.js';
 
 /** Unpaid, undelivered orders a customer may hold at once; stops stock hoarding. */
 const maxOpenOrdersPerUser = 5;
 
 async function buildOrderItems(
   input: CreateOrderInput['orderItems'],
-  session: ClientSession,
+  session?: ClientSession,
 ): Promise<OrderItemRecord[]> {
   const products = await Product.find({ _id: { $in: input.map((item) => item.product) } })
     .select('name imageUrl price countInStock')
-    .session(session)
+    .session(session ?? null)
     .lean();
   const productsById = new Map(products.map((product) => [product._id.toString(), product]));
 
@@ -69,7 +75,8 @@ export async function reserveStock(items: OrderItemRecord[], session: ClientSess
   }
 }
 
-async function releaseStock(items: OrderItemRecord[], session: ClientSession) {
+/** Puts reserved stock back, inside the caller's transaction. */
+export async function releaseStock(items: OrderItemRecord[], session: ClientSession) {
   for (const item of [...items].sort(byProductId)) {
     // A deleted product simply matches nothing.
     await Product.updateOne(
@@ -127,19 +134,32 @@ export async function createOrder(
 
   try {
     const order = await withTransaction(async (session) => {
+      const orderId = new Types.ObjectId();
       const orderItems = await buildOrderItems(input.orderItems, session);
-      const pricing = calculateOrderPricing(orderItems);
+      const pricing = await priceForUser(userId, orderItems, input.pointsToRedeem, session);
       assertTotalUnchanged(input.totalPrice, pricing.totalPrice);
 
+      // Both claims are guarded writes on the user document: a concurrent checkout by the same
+      // customer conflicts here and is retried against the new state.
+      if (pricing.firstOrderDiscount > 0 && !(await claimFirstOrderDiscount(userId, session))) {
+        throw new ConflictError(
+          'Your first-order discount was already used. Please review your order.',
+          'PRICE_CHANGED',
+        );
+      }
+      await spendPoints(userId, orderId.toString(), pricing.pointsRedeemed, session);
       await reserveStock(orderItems, session);
+
       const [created] = await Order.create(
         [
           {
+            _id: orderId,
             user: userId,
             orderItems,
             shippingAddress: input.shippingAddress,
             paymentMethod: input.paymentMethod,
             idempotencyKey,
+            // `maxRedeemablePoints` is display-only; strict schema mode drops it.
             ...pricing,
           },
         ],
@@ -158,18 +178,32 @@ export async function createOrder(
   }
 }
 
-/** Cancels an unpaid order and returns its stock, atomically. Returns null if it was paid or
- * cancelled in the meantime. */
-export function cancelUnpaidOrder(orderId: string) {
-  return withTransaction(async (session) => {
-    const order = await Order.findOneAndUpdate(
-      { _id: orderId, isPaid: false, ...notCancelled },
-      { isCancelled: true, cancelledAt: new Date() },
-      { new: true, session },
-    ).lean();
-    if (order) await releaseStock(order.orderItems, session);
-    return order;
+/** Prices items with this customer's discount eligibility and points balance. */
+async function priceForUser(
+  userId: string,
+  orderItems: OrderItemRecord[],
+  pointsRequested: number,
+  session?: ClientSession,
+): Promise<OrderPricing> {
+  const [isEligible, user] = await Promise.all([
+    isFirstOrderEligible(userId, session),
+    User.findById(userId)
+      .select('pointsBalance')
+      .session(session ?? null)
+      .lean(),
+  ]);
+  return priceOrder({
+    items: orderItems,
+    isFirstOrderEligible: isEligible,
+    pointsRequested,
+    pointsBalance: user?.pointsBalance ?? 0,
   });
+}
+
+/** What checkout would charge right now; the same numbers `createOrder` will use. */
+export async function quoteOrder(userId: string, input: QuoteOrderInput): Promise<OrderPricing> {
+  const orderItems = await buildOrderItems(input.orderItems);
+  return priceForUser(userId, orderItems, input.pointsToRedeem);
 }
 
 type PopulatedOrderUser = { _id: Types.ObjectId; name: string; email: string } | null;
@@ -199,48 +233,4 @@ export function listOrdersForUser(userId: string) {
 // Move reports to a server-side aggregation and paginate this when order volume grows.
 export function listAllOrders() {
   return Order.find().populate('user', 'name').sort({ createdAt: -1 }).lean();
-}
-
-/**
- * Updates an order only if `guard` still matches and it isn't cancelled, so concurrent
- * requests can't apply twice.
- */
-async function transitionOrder(
-  orderId: string,
-  guard: { isPaid: false } | { isDelivered: false },
-  update: object,
-  conflictMessage: string,
-  conflictCode: string,
-) {
-  const order = await Order.findOneAndUpdate({ _id: orderId, ...guard, ...notCancelled }, update, {
-    new: true,
-  }).lean();
-  if (order) return order;
-
-  const existing = await Order.findById(orderId).select('isCancelled').lean();
-  if (!existing) throw new NotFoundError('Order not found', 'ORDER_NOT_FOUND');
-  if (existing.isCancelled) throw new ConflictError('Order is cancelled', 'ORDER_CANCELLED');
-  throw new ConflictError(conflictMessage, conflictCode);
-}
-
-// ponytail: admin-only manual confirmation (e.g. cash collected). Razorpay verification replaces
-// this for online payments.
-export function markOrderPaid(orderId: string, payment: MarkPaidInput) {
-  return transitionOrder(
-    orderId,
-    { isPaid: false },
-    { isPaid: true, paidAt: new Date(), paymentResult: payment },
-    'Order is already paid',
-    'ORDER_ALREADY_PAID',
-  );
-}
-
-export function markOrderDelivered(orderId: string) {
-  return transitionOrder(
-    orderId,
-    { isDelivered: false },
-    { isDelivered: true, deliveredAt: new Date() },
-    'Order is already delivered',
-    'ORDER_ALREADY_DELIVERED',
-  );
 }
