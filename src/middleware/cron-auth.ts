@@ -4,7 +4,7 @@ import { env } from '../config/env.js';
 import { NotFoundError, UnauthorizedError } from '../lib/errors.js';
 
 /**
- * Vercel Cron calls with `Authorization: Bearer $CRON_SECRET`. The endpoint doesn't exist
+ * A scheduler (Vercel Cron, cron-job.org, …) calls with `Authorization: Bearer $CRON_SECRET`. The endpoint doesn't exist
  * (404) until a secret is configured, so it can't be triggered by anyone by accident.
  */
 export function requireCronSecret(req: Request, _res: Response, next: NextFunction) {

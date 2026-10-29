@@ -21,7 +21,7 @@ apiRouter.use('/rewards', rewardsRouter);
 apiRouter.use('/wishlist', wishlistRouter);
 apiRouter.use('/memberships', membershipsRouter);
 
-/** Serverless hosts (Vercel) can't run the expiry timer from server.ts; a cron calls this. */
+/** Serverless hosts (Vercel) can't run the expiry timer from server.ts; an external scheduler can call this. */
 const cronRouter = Router();
 cronRouter.get('/expire-orders', requireCronSecret, async (_req, res) => {
   res.json(await runExpirySweeps());
