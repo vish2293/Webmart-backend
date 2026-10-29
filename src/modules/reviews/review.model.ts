@@ -7,6 +7,8 @@ export interface ReviewRecord {
   rating: number;
   title?: string;
   comment?: string;
+  /** Sample review from `npm run seed:reviews`; shown as a sample, never as a verified purchase. */
+  isDemo?: boolean;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -18,6 +20,7 @@ const reviewSchema = new Schema<ReviewRecord>(
     rating: { type: Number, required: true, min: 1, max: 5 },
     title: { type: String, trim: true, maxlength: 100 },
     comment: { type: String, trim: true, maxlength: 2000 },
+    isDemo: { type: Boolean, default: undefined },
   },
   { timestamps: true },
 );

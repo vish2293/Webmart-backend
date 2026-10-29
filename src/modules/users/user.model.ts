@@ -28,6 +28,8 @@ export interface UserRecord {
   firstOrderDiscountUsedAt?: Date;
   /** Plus benefits apply while this is in the future. Only changed with a Membership update. */
   membershipEndsAt?: Date;
+  /** Saved product ids, oldest first (the API returns them newest first). */
+  wishlist: Types.ObjectId[];
   /** The customer's address book; at most one entry has `isDefault`. */
   addresses: SavedAddressRecord[];
   /** SHA-256 of the emailed reset token; the token itself is never stored. */
@@ -48,6 +50,7 @@ const userSchema = new Schema<UserRecord>(
     pointsBalance: { type: Number, required: true, default: 0, min: 0 },
     firstOrderDiscountUsedAt: Date,
     membershipEndsAt: Date,
+    wishlist: [{ type: Schema.Types.ObjectId, ref: 'Product' }],
     addresses: [
       {
         label: { type: String, required: true, trim: true },

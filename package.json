@@ -10,7 +10,8 @@
     "lint": "eslint .",
     "format": "prettier --write src",
     "format:check": "prettier --check src",
-    "seed:products": "tsx src/scripts/seed-products.ts"
+    "seed:products": "tsx src/scripts/seed-products.ts",
+    "seed:reviews": "tsx src/scripts/seed-reviews.ts"
   },
   "keywords": [],
   "author": "",

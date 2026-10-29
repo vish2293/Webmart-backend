@@ -31,7 +31,7 @@ function hasReceivedProduct(userId: string, productId: string) {
 }
 
 /** Rebuilds the product's average and count from its reviews, so they always match them. */
-async function recomputeProductRating(productId: string) {
+export async function recomputeProductRating(productId: string) {
   const [stats] = await Review.aggregate<{ average: number; count: number }>([
     { $match: { product: new Types.ObjectId(productId) } },
     { $group: { _id: null, average: { $avg: '$rating' }, count: { $sum: 1 } } },
@@ -77,6 +77,7 @@ export async function listReviews(productId: string, query: ListReviewsQuery) {
       title: review.title,
       comment: review.comment,
       authorName: displayName(review.user?.name),
+      isDemo: review.isDemo === true,
       createdAt: review.createdAt,
       updatedAt: review.updatedAt,
     })),

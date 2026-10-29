@@ -8,6 +8,7 @@ import { ordersRouter } from '../modules/orders/orders.routes.js';
 import { reviewsRouter } from '../modules/reviews/reviews.routes.js';
 import { productsRouter } from '../modules/products/products.routes.js';
 import { rewardsRouter } from '../modules/rewards/rewards.routes.js';
+import { wishlistRouter } from '../modules/wishlist/wishlist.routes.js';
 import { usersRouter } from '../modules/users/users.routes.js';
 
 export const apiRouter = Router();
@@ -17,6 +18,7 @@ apiRouter.use('/products', productsRouter);
 apiRouter.use('/users', usersRouter);
 apiRouter.use('/orders', ordersRouter);
 apiRouter.use('/rewards', rewardsRouter);
+apiRouter.use('/wishlist', wishlistRouter);
 apiRouter.use('/memberships', membershipsRouter);
 
 /** Serverless hosts (Vercel) can't run the expiry timer from server.ts; a cron calls this. */
