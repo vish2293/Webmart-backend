@@ -7,7 +7,7 @@ import { env } from './config/env.js';
 import { logger } from './lib/logger.js';
 import { errorHandler, notFound } from './middleware/error-handler.js';
 import { apiRateLimit } from './middleware/rate-limit.js';
-import { apiRouter, healthRouter, webhooksRouter } from './routes/index.js';
+import { apiRouter, healthRouter, stripeRouter, webhooksRouter } from './routes/index.js';
 
 const requestIdPattern = /^[\w-]{1,64}$/;
 
@@ -42,10 +42,11 @@ export function createApp() {
   app.use(helmet());
   app.use(cors({ origin: env.CORS_ORIGINS }));
   app.use('/api/webhooks', webhooksRouter);
+  app.use('/api/stripe', stripeRouter);
   app.use(express.json({ limit: '100kb' }));
 
   app.use('/health', healthRouter);
-  // Webhooks are mounted above and stay unlimited: Razorpay retries can burst.
+  // Webhooks are mounted above and stay unlimited: gateway retries can burst.
   app.use('/api', apiRateLimit, apiRouter);
 
   app.use(notFound);

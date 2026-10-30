@@ -2,10 +2,13 @@ import type { Request, Response } from 'express';
 import { idParamsSchema } from '../../lib/validation.js';
 import { getAuthenticatedUser } from '../../middleware/authenticate.js';
 import { isValidWebhookSignature } from '../../integrations/razorpay.js';
-import { BadRequestError } from '../../lib/errors.js';
+import { AppError, BadRequestError } from '../../lib/errors.js';
+import { constructWebhookEvent, isStripeConfigured } from '../../integrations/stripe.js';
 import * as orderLifecycle from './order-lifecycle.service.js';
 import * as orderPaymentsService from './order-payments.service.js';
 import * as orderRefunds from './order-refunds.service.js';
+import * as orderStripe from './order-stripe.service.js';
+import { StripeEvent } from './stripe-event.model.js';
 import * as ordersService from './orders.service.js';
 import {
   createOrderSchema,
@@ -26,6 +29,54 @@ export async function startRazorpayPayment(req: Request, res: Response) {
   const { id } = idParamsSchema.parse(req.params);
   const checkout = await orderPaymentsService.startRazorpayPayment(id, getAuthenticatedUser(req));
   res.status(201).json(checkout);
+}
+
+/** Which online payment methods this server can take, so checkout only offers working ones. */
+export function getPaymentOptions(_req: Request, res: Response) {
+  res.json({ stripe: isStripeConfigured });
+}
+
+export async function startStripePayment(req: Request, res: Response) {
+  const { id } = idParamsSchema.parse(req.params);
+  res.status(201).json(await orderStripe.startStripePayment(id, getAuthenticatedUser(req)));
+}
+
+export async function syncStripePayment(req: Request, res: Response) {
+  const { id } = idParamsSchema.parse(req.params);
+  res.json(await orderStripe.syncStripePayment(id, getAuthenticatedUser(req)));
+}
+
+/**
+ * POST /api/stripe/webhook. Mounted with `express.raw`, so `req.body` is the exact bytes Stripe
+ * signed. Anything that fails the signature check is rejected before it is parsed or trusted.
+ */
+export async function handleStripeWebhook(req: Request, res: Response) {
+  const signature = req.header('stripe-signature');
+  if (!Buffer.isBuffer(req.body) || !signature) {
+    throw new BadRequestError('Invalid webhook signature', 'WEBHOOK_SIGNATURE_INVALID');
+  }
+  let event;
+  try {
+    event = constructWebhookEvent(req.body, signature);
+  } catch (error) {
+    if (error instanceof AppError) throw error; // webhooks not configured: 503
+    throw new BadRequestError('Invalid webhook signature', 'WEBHOOK_SIGNATURE_INVALID');
+  }
+
+  // Stripe redelivers events (retries, replays). One that already finished is just acknowledged.
+  if (await StripeEvent.exists({ _id: event.id })) {
+    res.json({ received: true, duplicate: true });
+    return;
+  }
+  // Non-2xx makes Stripe retry, which is what we want if the database is briefly down. The
+  // handlers are idempotent, so two deliveries racing here can't double-apply anything.
+  await orderStripe.handleStripeEvent(event);
+  await StripeEvent.updateOne(
+    { _id: event.id },
+    { $setOnInsert: { type: event.type, processedAt: new Date() } },
+    { upsert: true },
+  );
+  res.json({ received: true });
 }
 
 export async function switchToCashOnDelivery(req: Request, res: Response) {

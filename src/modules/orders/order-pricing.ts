@@ -1,3 +1,4 @@
+import type { CouponRule } from '../coupons/coupons.service.js';
 import { membershipRules } from '../memberships/memberships.config.js';
 import { rewardRules } from '../rewards/rewards.config.js';
 
@@ -26,6 +27,9 @@ export type OrderPricing = {
   memberBenefitsApplied: boolean;
   pointsMultiplier: number;
   firstOrderDiscount: number;
+  /** Coupon applied to this order, and the rupees it took off. */
+  couponCode?: string;
+  couponDiscount: number;
   pointsRedeemed: number;
   pointsDiscount: number;
   /** Most points usable on this order with the customer's balance (for display). */
@@ -37,6 +41,8 @@ export type OrderPricing = {
 export type PriceOrderInput = {
   items: { price: number; qty: number }[];
   isFirstOrderEligible: boolean;
+  /** A coupon that already passed its eligibility checks; this only works out its amount. */
+  coupon?: CouponRule;
   isMember: boolean;
   deliveryOption: DeliveryOption;
   pointsRequested: number;
@@ -47,6 +53,15 @@ const roundMoney = (amount: number) => Math.round(amount * 100) / 100;
 
 /** Razorpay amounts are integers in the smallest currency unit. */
 export const toPaise = (amountInRupees: number) => Math.round(amountInRupees * 100);
+
+/** Rupees a coupon takes off an amount: a percentage (up to its cap) or a flat sum, never below 0. */
+function couponAmount(coupon: CouponRule, amount: number) {
+  const raw =
+    coupon.type === 'percent'
+      ? Math.min((amount * coupon.value) / 100, coupon.maxDiscount ?? Number.POSITIVE_INFINITY)
+      : coupon.value;
+  return Math.max(0, Math.min(raw, amount));
+}
 
 /**
  * The single source of order totals: used by the checkout quote and by order creation, so the
@@ -75,10 +90,13 @@ export function priceOrder(input: PriceOrderInput): OrderPricing {
     : 0;
 
   const afterFirstOrder = itemsPrice - firstOrderDiscount;
+  // Applied after the first-order discount and never more than what's left of the items price.
+  const couponDiscount = input.coupon ? roundMoney(couponAmount(input.coupon, afterFirstOrder)) : 0;
+  const afterCoupon = afterFirstOrder - couponDiscount;
   const maxRedeemablePoints = Math.max(
     0,
     Math.min(
-      Math.floor((afterFirstOrder * rewardRules.maxRedeemShare) / rewardRules.rupeesPerPointSpent),
+      Math.floor((afterCoupon * rewardRules.maxRedeemShare) / rewardRules.rupeesPerPointSpent),
       Math.floor(input.pointsBalance),
     ),
   );
@@ -89,7 +107,7 @@ export function priceOrder(input: PriceOrderInput): OrderPricing {
   const pointsDiscount = roundMoney(pointsRedeemed * rewardRules.rupeesPerPointSpent);
 
   // Discounts reduce the taxable amount.
-  const taxableAmount = roundMoney(afterFirstOrder - pointsDiscount);
+  const taxableAmount = roundMoney(afterCoupon - pointsDiscount);
   const taxPrice = roundMoney(taxableAmount * pricingRules.taxRate);
 
   return {
@@ -100,6 +118,8 @@ export function priceOrder(input: PriceOrderInput): OrderPricing {
     memberBenefitsApplied: input.isMember,
     pointsMultiplier: input.isMember ? membershipRules.pointsMultiplier : 1,
     firstOrderDiscount,
+    ...(input.coupon && { couponCode: input.coupon.code }),
+    couponDiscount,
     pointsRedeemed,
     pointsDiscount,
     maxRedeemablePoints,

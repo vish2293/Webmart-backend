@@ -1,6 +1,8 @@
 import { Types, type ClientSession } from 'mongoose';
+import { isStripeConfigured } from '../../integrations/stripe.js';
+import { checkCoupon, claimCoupon, type CouponRule } from '../coupons/coupons.service.js';
 import { isDuplicateKeyError, withTransaction } from '../../lib/db.js';
-import { ConflictError, ForbiddenError, NotFoundError } from '../../lib/errors.js';
+import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../../lib/errors.js';
 import { claimMembershipBenefit, isMembershipActive } from '../memberships/memberships.service.js';
 import { notifyOrder } from '../notifications/notifications.service.js';
 import { Product } from '../products/product.model.js';
@@ -168,6 +170,10 @@ export async function createOrder(
     const existing = await findByIdempotencyKey(userId, idempotencyKey);
     if (existing) return { order: existing, isNew: false };
   }
+  // Never create an order that couldn't be paid.
+  if (input.paymentMethod === 'Stripe' && !isStripeConfigured) {
+    throw new BadRequestError('Stripe payments are not available', 'PAYMENT_METHOD_UNAVAILABLE');
+  }
   // ponytail: count runs outside the transaction, so two simultaneous requests can exceed the
   // cap by one. It's an abuse limit, not an invariant.
   await assertOpenOrderLimit(userId);
@@ -176,13 +182,16 @@ export async function createOrder(
     const order = await withTransaction(async (session) => {
       const orderId = new Types.ObjectId();
       const orderItems = await buildOrderItems(input.orderItems, session);
-      const pricing = await priceForUser(
+      const { pricing, coupon, couponError } = await priceForUser(
         userId,
         orderItems,
         input.pointsToRedeem,
         input.deliveryOption,
+        input.couponCode,
         session,
       );
+      // The customer asked for a coupon that no longer works: tell them rather than charging more.
+      if (couponError) throw new ConflictError(couponError, 'COUPON_INVALID');
       assertTotalUnchanged(input.totalPrice, pricing.totalPrice);
 
       // Both claims are guarded writes on the user document: a concurrent checkout by the same
@@ -200,6 +209,8 @@ export async function createOrder(
           'PRICE_CHANGED',
         );
       }
+      // Takes a use of the coupon; fails if someone else just took the last one.
+      if (coupon) await claimCoupon(coupon.id, userId, orderId.toString(), session);
       await spendPoints(userId, orderId.toString(), pricing.pointsRedeemed, session);
       await reserveStock(orderItems, session);
 
@@ -214,6 +225,7 @@ export async function createOrder(
             idempotencyKey,
             deliveryOption: input.deliveryOption,
             estimatedDeliveryDate: estimatedDeliveryDate(input.deliveryOption),
+            ...(coupon && { coupon: coupon.id }),
             // `maxRedeemablePoints` is display-only; strict schema mode drops it.
             ...pricing,
           },
@@ -237,34 +249,66 @@ export async function createOrder(
   }
 }
 
-/** Prices items with this customer's discount eligibility and points balance. */
+type PricedOrder = {
+  pricing: OrderPricing;
+  /** The coupon, when one was entered and applies. */
+  coupon?: CouponRule;
+  /** Why an entered coupon doesn't apply. Prices are then worked out without it. */
+  couponError?: string;
+};
+
+/** Prices items with this customer's discount eligibility, coupon and points balance. */
 async function priceForUser(
   userId: string,
   orderItems: OrderItemRecord[],
   pointsRequested: number,
   deliveryOption: DeliveryOption,
+  couponCode: string | undefined,
   session?: ClientSession,
-): Promise<OrderPricing> {
+): Promise<PricedOrder> {
   // Sequential on purpose: one transaction session must not run operations in parallel.
   const isEligible = await isFirstOrderEligible(userId, session);
   const user = await User.findById(userId)
     .select('pointsBalance membershipEndsAt')
     .session(session ?? null)
     .lean();
-  return priceOrder({
+
+  let coupon: CouponRule | undefined;
+  let couponError: string | undefined;
+  if (couponCode) {
+    const itemsPrice = orderItems.reduce((sum, item) => sum + item.price * item.qty, 0);
+    const check = await checkCoupon(couponCode, userId, itemsPrice, session);
+    if (check.ok) coupon = check.rule;
+    else couponError = check.message;
+  }
+
+  const pricing = priceOrder({
     items: orderItems,
     isFirstOrderEligible: isEligible,
+    ...(coupon && { coupon }),
     isMember: isMembershipActive(user?.membershipEndsAt),
     deliveryOption,
     pointsRequested,
     pointsBalance: user?.pointsBalance ?? 0,
   });
+  return { pricing, ...(coupon && { coupon }), ...(couponError && { couponError }) };
 }
 
 /** What checkout would charge right now; the same numbers `createOrder` will use. */
-export async function quoteOrder(userId: string, input: QuoteOrderInput): Promise<OrderPricing> {
+export async function quoteOrder(
+  userId: string,
+  input: QuoteOrderInput,
+): Promise<OrderPricing & { couponError?: string }> {
   const orderItems = await buildOrderItems(input.orderItems);
-  return priceForUser(userId, orderItems, input.pointsToRedeem, input.deliveryOption);
+  const { pricing, couponError } = await priceForUser(
+    userId,
+    orderItems,
+    input.pointsToRedeem,
+    input.deliveryOption,
+    input.couponCode,
+  );
+  // A coupon that doesn't apply doesn't fail the quote: checkout shows the reason beside the field.
+  return { ...pricing, ...(couponError && { couponError }) };
 }
 
 type PopulatedOrderUser = { _id: Types.ObjectId; name: string; email: string } | null;

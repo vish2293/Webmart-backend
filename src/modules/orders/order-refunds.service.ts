@@ -1,5 +1,6 @@
 import type { ClientSession } from 'mongoose';
 import { createRazorpayRefund, listRazorpayPaymentRefunds } from '../../integrations/razorpay.js';
+import { createStripeRefund, findStripeRefund } from '../../integrations/stripe.js';
 import { ConflictError, NotFoundError } from '../../lib/errors.js';
 import { logger } from '../../lib/logger.js';
 import { Order, type RefundReason, type RefundRecord, type RefundStatus } from './order.model.js';
@@ -8,8 +9,48 @@ import { toPaise } from './order-pricing.js';
 /** Marker payment id for cash-on-delivery money that must be returned outside the app. */
 export const codPaymentId = 'cod';
 
-const toRefundStatus = (razorpayStatus: string): RefundStatus =>
-  razorpayStatus === 'processed' ? 'processed' : razorpayStatus === 'failed' ? 'failed' : 'pending';
+/** Both gateways' refund states end up as processed / failed / still pending. */
+const toRefundStatus = (gatewayStatus: string): RefundStatus =>
+  gatewayStatus === 'processed' ? 'processed' : gatewayStatus === 'failed' ? 'failed' : 'pending';
+
+/** Stripe payments are PaymentIntents (`pi_…`); Razorpay payments are `pay_…`. */
+export const isStripePaymentId = (paymentId: string) => paymentId.startsWith('pi_');
+/** A payment id one of the gateways can refund; anything else (cash, admin-entered) is manual. */
+export const isGatewayPaymentId = (paymentId: string | undefined): paymentId is string =>
+  paymentId !== undefined && (paymentId.startsWith('pay_') || isStripePaymentId(paymentId));
+
+/** Finds the live refund for a payment or creates it, at whichever gateway took the money. */
+async function refundAtGateway(
+  paymentId: string,
+  amount: number,
+  orderId: string,
+  reason: RefundReason,
+): Promise<{ id: string; status: string }> {
+  if (isStripePaymentId(paymentId)) {
+    return (
+      (await findStripeRefund(paymentId)) ??
+      (await createStripeRefund({
+        paymentIntentId: paymentId,
+        amountInPaise: toPaise(amount),
+        orderId,
+        reason,
+      }))
+    );
+  }
+  // If an earlier attempt reached Razorpay but we crashed before saving, reuse that refund
+  // instead of refunding the customer twice.
+  const existing = (await listRazorpayPaymentRefunds(paymentId)).find(
+    (refund) => refund.status !== 'failed',
+  );
+  return (
+    existing ??
+    (await createRazorpayRefund({
+      paymentId,
+      amountInPaise: toPaise(amount),
+      notes: { orderId, reason },
+    }))
+  );
+}
 
 async function findRefund(orderId: string, paymentId: string): Promise<RefundRecord> {
   const order = await Order.findById(orderId).select('refunds').lean();
@@ -57,18 +98,7 @@ async function submitRefund(
   reason: RefundReason,
 ): Promise<RefundRecord> {
   try {
-    // If an earlier attempt reached Razorpay but we crashed before saving, reuse that refund
-    // instead of refunding the customer twice.
-    const existing = (await listRazorpayPaymentRefunds(paymentId)).find(
-      (refund) => refund.status !== 'failed',
-    );
-    const refund =
-      existing ??
-      (await createRazorpayRefund({
-        paymentId,
-        amountInPaise: toPaise(amount),
-        notes: { orderId, reason },
-      }));
+    const refund = await refundAtGateway(paymentId, amount, orderId, reason);
     const status = toRefundStatus(refund.status);
     // The id is always recorded; the status only if no webhook has settled it in the meantime.
     await updateRefund(orderId, paymentId, { razorpayRefundId: refund.id });
@@ -79,7 +109,7 @@ async function submitRefund(
       { unset: ['failureReason'], onlyIfPending: true },
     );
   } catch (error) {
-    logger.error({ err: error, orderId, paymentId }, 'Razorpay refund failed; an admin can retry');
+    logger.error({ err: error, orderId, paymentId }, 'Gateway refund failed; an admin can retry');
     await updateRefund(
       orderId,
       paymentId,
@@ -116,7 +146,7 @@ export async function claimRefund(request: RefundRequest, session?: ClientSessio
   return claimed.modifiedCount === 1;
 }
 
-/** Sends an already-claimed refund to Razorpay (after the claiming transaction commits). */
+/** Sends an already-claimed refund to the gateway (after the claiming transaction commits). */
 export async function submitClaimedRefund(orderId: string, paymentId: string) {
   const entry = await findRefund(orderId, paymentId);
   return submitRefund(orderId, paymentId, entry.amount, entry.reason);
@@ -168,7 +198,7 @@ export async function retryFailedRefund(orderId: string, paymentId: string) {
   return submitRefund(orderId, paymentId, entry.amount, entry.reason);
 }
 
-/** Cash-on-delivery payments can't go back through Razorpay; flag them for the admin. */
+/** Cash-on-delivery payments can't go back through a gateway; flag them for the admin. */
 export async function recordManualRefund(
   orderId: string,
   amount: number,
@@ -193,7 +223,7 @@ export async function recordManualRefund(
 }
 
 /**
- * Razorpay refund events. Matched by refund id, or — when the webhook beats our own save of
+ * Gateway refund events (Razorpay or Stripe). Matched by refund id, or — when the webhook beats our own save of
  * that id — by the payment's pending refund.
  */
 export async function applyRefundWebhook(

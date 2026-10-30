@@ -20,10 +20,13 @@ ordersRouter
   .get(requireAdmin, ordersController.listAllOrders);
 
 ordersRouter.post('/quote', quoteRateLimit, ordersController.quoteOrder);
+ordersRouter.get('/payment-options', ordersController.getPaymentOptions);
 ordersRouter.get('/myorders', ordersController.listMyOrders);
 ordersRouter.get('/:id', ordersController.getOrder);
 ordersRouter.post('/:id/razorpay', paymentRateLimit, ordersController.startRazorpayPayment);
 ordersRouter.post('/:id/razorpay/verify', paymentRateLimit, ordersController.verifyRazorpayPayment);
+ordersRouter.post('/:id/stripe', paymentRateLimit, ordersController.startStripePayment);
+ordersRouter.post('/:id/stripe/sync', paymentRateLimit, ordersController.syncStripePayment);
 ordersRouter.post(
   '/:id/cash-on-delivery',
   paymentRateLimit,

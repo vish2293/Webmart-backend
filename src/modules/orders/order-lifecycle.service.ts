@@ -17,8 +17,15 @@ import {
 } from './order.model.js';
 import { notifyOrder } from '../notifications/notifications.service.js';
 import { pointsEarnedFor } from './order-pricing.js';
-import { claimRefund, recordManualRefund, submitClaimedRefund } from './order-refunds.service.js';
+import {
+  claimRefund,
+  isGatewayPaymentId,
+  recordManualRefund,
+  submitClaimedRefund,
+} from './order-refunds.service.js';
+import { closeStripeCheckoutForOrder } from './order-stripe.service.js';
 import { releaseStock } from './orders.service.js';
+import { releaseCoupon } from '../coupons/coupons.service.js';
 import type { MarkPaidInput } from './orders.validation.js';
 
 type LifecycleAction = 'cancel' | 'ship' | 'deliver' | 'pay' | 'refund';
@@ -80,7 +87,7 @@ function explainBlocked(order: OrderRecord | null, action: LifecycleAction): nev
  * first-order discount. Returns null if the order shipped, was cancelled or refunded meanwhile.
  */
 export async function cancelOrderInTransaction(
-  order: Pick<OrderRecord, '_id' | 'user' | 'orderItems' | 'firstOrderDiscount'>,
+  order: Pick<OrderRecord, '_id' | 'user' | 'orderItems' | 'firstOrderDiscount' | 'coupon'>,
   reason: CancelReason,
   session: ClientSession,
   extraGuard: object = {},
@@ -95,6 +102,7 @@ export async function cancelOrderInTransaction(
   const userId = order.user.toString();
   await releaseStock(cancelled.orderItems, session);
   await returnSpentPoints(userId, order._id.toString(), session);
+  if (order.coupon) await releaseCoupon(order.coupon, userId, order._id.toString(), session);
   if (order.firstOrderDiscount > 0) await releaseFirstOrderDiscount(userId, session);
   return cancelled;
 }
@@ -120,9 +128,9 @@ async function claimPaymentReturn(
   if (!order.isPaid) return null;
   const orderId = order._id.toString();
   const paymentId = order.paymentResult?.id;
-  // Cash collected on delivery (or an admin-confirmed payment with no Razorpay id) can't go
-  // back through the gateway.
-  if (order.paymentMethod === 'Cash on Delivery' || !paymentId?.startsWith('pay_')) {
+  // Cash collected on delivery (or an admin-confirmed payment with no gateway id) can't go
+  // back through a gateway.
+  if (order.paymentMethod === 'Cash on Delivery' || !isGatewayPaymentId(paymentId)) {
     await recordManualRefund(orderId, order.totalPrice, reason, session);
     return null;
   }
@@ -160,8 +168,9 @@ export async function cancelOrder(
     return claimPaymentReturn(cancelled, reason, session);
   });
 
-  // Razorpay is called only after the cancel and the refund claim committed together.
+  // The gateway is called only after the cancel and the refund claim committed together.
   if (paymentToRefund) await submitClaimedRefund(orderId, paymentToRefund);
+  await closeStripeCheckoutForOrder(orderId);
   await notifyOrder(orderId, 'cancelled');
   return reloadOrder(orderId);
 }

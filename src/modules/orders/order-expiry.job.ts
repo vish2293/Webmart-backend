@@ -22,7 +22,7 @@ export async function expireUnpaidOrders(now = new Date()) {
     paymentMethod: { $ne: 'Cash on Delivery' },
     createdAt: { $lt: cutoff },
   })
-    .select('razorpayOrderId totalPrice')
+    .select('razorpayOrderId stripeCheckoutSessionId totalPrice')
     .sort({ createdAt: 1 })
     .limit(batchSize)
     .lean();

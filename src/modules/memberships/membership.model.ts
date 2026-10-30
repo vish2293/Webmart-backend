@@ -41,7 +41,7 @@ export interface MembershipRecord {
 
 const membershipSchema = new Schema<MembershipRecord>(
   {
-    user: { type: Schema.Types.ObjectId, required: true, ref: 'User', index: true },
+    user: { type: Schema.Types.ObjectId, required: true, ref: 'User' },
     plan: { type: String, required: true, enum: membershipPlanIds },
     status: {
       type: String,
@@ -72,6 +72,10 @@ const membershipSchema = new Schema<MembershipRecord>(
   { timestamps: true },
 );
 
+// A customer's current membership, and their pending checkout for a plan.
+membershipSchema.index({ user: 1, status: 1, endsAt: -1 });
+// The admin list, newest first.
+membershipSchema.index({ createdAt: -1 });
 // Expiry sweeps scan by status and date.
 membershipSchema.index({ status: 1, endsAt: 1 });
 membershipSchema.index({ status: 1, createdAt: 1 });

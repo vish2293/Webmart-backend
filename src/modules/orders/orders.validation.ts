@@ -1,9 +1,10 @@
 import { z } from 'zod';
 import { objectIdSchema } from '../../lib/validation.js';
+import { couponCodeSchema } from '../coupons/coupons.validation.js';
 import { deliveryOptions } from './order-pricing.js';
 
 // 'UPI' and 'Card' are kept for orders placed before checkout offered a single Razorpay option.
-export const paymentMethods = ['Razorpay', 'UPI', 'Card', 'Cash on Delivery'] as const;
+export const paymentMethods = ['Razorpay', 'Stripe', 'UPI', 'Card', 'Cash on Delivery'] as const;
 export type PaymentMethod = (typeof paymentMethods)[number];
 
 const addressLine = (max: number) => z.string().trim().min(1).max(max);
@@ -39,6 +40,8 @@ export const createOrderSchema = z.object({
   }),
   paymentMethod: z.enum(paymentMethods),
   deliveryOption: z.enum(deliveryOptions).default('standard'),
+  /** A coupon the customer entered; the server decides whether it applies. */
+  couponCode: couponCodeSchema.optional(),
   /** Points the customer chose to use; the server caps it to what's allowed. */
   pointsToRedeem: z.number().int().min(0).max(1_000_000).default(0),
 });
@@ -47,6 +50,7 @@ export const quoteOrderSchema = createOrderSchema.pick({
   orderItems: true,
   pointsToRedeem: true,
   deliveryOption: true,
+  couponCode: true,
 });
 
 const paymentField = z.string().trim().max(200).optional();
@@ -64,7 +68,8 @@ const razorpayId = z.string().trim().min(1).max(100);
 
 export const refundParamsSchema = z.object({
   id: objectIdSchema,
-  paymentId: z.string().regex(/^pay_\w{1,60}$/, 'Invalid payment id'),
+  // Razorpay `pay_…` or a Stripe PaymentIntent `pi_…`.
+  paymentId: z.string().regex(/^(pay|pi)_\w{1,60}$/, 'Invalid payment id'),
 });
 
 /** Field names match what Razorpay Checkout passes to its success handler. */

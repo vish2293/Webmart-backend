@@ -31,6 +31,16 @@ const envSchema = z.object({
     .regex(/^rzp_(test|live)_\w+$/, 'RAZORPAY_KEY_ID must start with rzp_'),
   RAZORPAY_KEY_SECRET: z.string().min(1),
   RAZORPAY_WEBHOOK_SECRET: z.string().min(1),
+  /** Stripe is optional: without both keys the "Stripe" payment method is simply not offered. */
+  STRIPE_SECRET_KEY: z
+    .string()
+    .regex(/^sk_(test|live)_\w+$/, 'STRIPE_SECRET_KEY must start with sk_test_ or sk_live_')
+    .optional(),
+  /** Signing secret of the webhook endpoint (Dashboard > Developers > Webhooks), starts with whsec_. */
+  STRIPE_WEBHOOK_SECRET: z
+    .string()
+    .regex(/^whsec_\w+$/, 'STRIPE_WEBHOOK_SECRET must start with whsec_')
+    .optional(),
   /** Unpaid online orders are cancelled (and their stock released) after this long. */
   ORDER_PAYMENT_WINDOW_MINUTES: z.coerce
     .number()
@@ -48,7 +58,12 @@ const envSchema = z.object({
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
 });
 
-const parsed = envSchema.safeParse(process.env);
+const parsed = envSchema
+  .refine((config) => Boolean(config.STRIPE_SECRET_KEY) === Boolean(config.STRIPE_WEBHOOK_SECRET), {
+    message: 'Set both STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET, or neither',
+    path: ['STRIPE_WEBHOOK_SECRET'],
+  })
+  .safeParse(process.env);
 
 if (!parsed.success) {
   // Logger depends on env, so report config errors directly and stop.

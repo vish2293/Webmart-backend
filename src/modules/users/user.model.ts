@@ -32,6 +32,8 @@ export interface UserRecord {
   wishlist: Types.ObjectId[];
   /** The customer's address book; at most one entry has `isDefault`. */
   addresses: SavedAddressRecord[];
+  /** Stripe Customer created on the customer's first Stripe payment; never sent to clients. */
+  stripeCustomerId?: string;
   /** SHA-256 of the emailed reset token; the token itself is never stored. */
   passwordResetTokenHash?: string;
   passwordResetExpiresAt?: Date;
@@ -61,6 +63,7 @@ const userSchema = new Schema<UserRecord>(
         isDefault: { type: Boolean, required: true, default: false },
       },
     ],
+    stripeCustomerId: { type: String, select: false, unique: true, sparse: true },
     passwordResetTokenHash: { type: String, select: false, index: true },
     passwordResetExpiresAt: { type: Date, select: false },
   },
@@ -72,5 +75,8 @@ userSchema.pre('save', async function hashPassword() {
   this.password = await bcrypt.hash(this.password, passwordSaltRounds);
   if (!this.isNew) this.passwordChangedAt = new Date();
 });
+
+// The admin user list, newest first.
+userSchema.index({ createdAt: -1 });
 
 export const User = model<UserRecord>('User', userSchema);

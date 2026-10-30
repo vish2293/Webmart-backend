@@ -1,9 +1,10 @@
 import express, { Router } from 'express';
 import { isDatabaseReady } from '../lib/db.js';
 import { requireCronSecret } from '../middleware/cron-auth.js';
+import { couponsRouter } from '../modules/coupons/coupons.routes.js';
 import { membershipsRouter } from '../modules/memberships/memberships.routes.js';
 import { runExpirySweeps } from '../modules/orders/order-expiry.job.js';
-import { handleRazorpayWebhook } from '../modules/orders/orders.controller.js';
+import { handleRazorpayWebhook, handleStripeWebhook } from '../modules/orders/orders.controller.js';
 import { ordersRouter } from '../modules/orders/orders.routes.js';
 import { reviewsRouter } from '../modules/reviews/reviews.routes.js';
 import { productsRouter } from '../modules/products/products.routes.js';
@@ -20,6 +21,7 @@ apiRouter.use('/orders', ordersRouter);
 apiRouter.use('/rewards', rewardsRouter);
 apiRouter.use('/wishlist', wishlistRouter);
 apiRouter.use('/memberships', membershipsRouter);
+apiRouter.use('/coupons', couponsRouter);
 
 /** Serverless hosts (Vercel) can't run the expiry timer from server.ts; an external scheduler can call this. */
 const cronRouter = Router();
@@ -35,6 +37,15 @@ webhooksRouter.post(
   '/razorpay',
   express.raw({ type: 'application/json', limit: '1mb' }),
   handleRazorpayWebhook,
+);
+
+/** `POST /api/stripe/webhook`. Raw body for the same reason as above; mounted before `express.json()`. */
+export const stripeRouter = Router();
+
+stripeRouter.post(
+  '/webhook',
+  express.raw({ type: 'application/json', limit: '1mb' }),
+  handleStripeWebhook,
 );
 
 export const healthRouter = Router();

@@ -23,7 +23,7 @@ export interface PaymentResultRecord {
   status?: string;
   update_time?: string;
   email_address?: string;
-  /** Razorpay payment method: upi, card, netbanking, wallet, … */
+  /** Gateway payment method: upi, card, netbanking, wallet, … */
   method?: string;
 }
 
@@ -47,6 +47,7 @@ export interface RefundRecord {
   paymentId: string;
   amount: number;
   status: RefundStatus;
+  /** Gateway refund id: Razorpay `rfnd_…` or Stripe `re_…`. */
   razorpayRefundId?: string;
   reason: RefundReason;
   requestedAt: Date;
@@ -63,8 +64,14 @@ export interface OrderRecord {
   paymentResult?: PaymentResultRecord;
   /** Gateway order created when the customer starts an online payment. */
   razorpayOrderId?: string;
+  /** Latest Stripe Checkout Session for this order (a new one replaces an expired one). */
+  stripeCheckoutSessionId?: string;
   itemsPrice: number;
   firstOrderDiscount: number;
+  /** The coupon used and what it took off; `coupon` lets cancellation give it back. */
+  coupon?: Types.ObjectId;
+  couponCode?: string;
+  couponDiscount: number;
   pointsRedeemed: number;
   pointsDiscount: number;
   /** Points credited once the order was paid and delivered. */
@@ -103,7 +110,7 @@ export interface OrderRecord {
 
 const orderSchema = new Schema<OrderRecord>(
   {
-    user: { type: Schema.Types.ObjectId, required: true, ref: 'User', index: true },
+    user: { type: Schema.Types.ObjectId, required: true, ref: 'User' },
     orderItems: [
       {
         // Name, image and price are snapshotted so later product edits don't rewrite history.
@@ -122,6 +129,7 @@ const orderSchema = new Schema<OrderRecord>(
     },
     paymentMethod: { type: String, required: true },
     razorpayOrderId: { type: String, unique: true, sparse: true },
+    stripeCheckoutSessionId: { type: String, unique: true, sparse: true },
     paymentResult: {
       id: String,
       status: String,
@@ -131,6 +139,9 @@ const orderSchema = new Schema<OrderRecord>(
     },
     itemsPrice: { type: Number, required: true, default: 0 },
     firstOrderDiscount: { type: Number, required: true, default: 0, min: 0 },
+    coupon: { type: Schema.Types.ObjectId, ref: 'Coupon' },
+    couponCode: String,
+    couponDiscount: { type: Number, required: true, default: 0, min: 0 },
     pointsRedeemed: { type: Number, required: true, default: 0, min: 0 },
     pointsDiscount: { type: Number, required: true, default: 0, min: 0 },
     pointsEarned: { type: Number, required: true, default: 0, min: 0 },
@@ -176,6 +187,11 @@ orderSchema.index(
   { user: 1, idempotencyKey: 1 },
   { unique: true, partialFilterExpression: { idempotencyKey: { $type: 'string' } } },
 );
+// "My orders" (newest first); its user prefix also serves every other per-customer lookup
+// (open-order limit, first-order check, Plus savings, review eligibility).
+orderSchema.index({ user: 1, createdAt: -1 });
+// The admin list of all orders, newest first.
+orderSchema.index({ createdAt: -1 });
 // Supports the expiry sweep over unpaid orders.
 orderSchema.index({ isPaid: 1, isCancelled: 1, createdAt: 1 });
 // Refund webhooks look orders up by Razorpay refund id or payment id.
