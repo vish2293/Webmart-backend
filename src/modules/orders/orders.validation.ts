@@ -2,7 +2,8 @@ import { z } from 'zod';
 import { objectIdSchema } from '../../lib/validation.js';
 import { deliveryOptions } from './order-pricing.js';
 
-export const paymentMethods = ['UPI', 'Card', 'Cash on Delivery'] as const;
+// 'UPI' and 'Card' are kept for orders placed before checkout offered a single Razorpay option.
+export const paymentMethods = ['Razorpay', 'UPI', 'Card', 'Cash on Delivery'] as const;
 export type PaymentMethod = (typeof paymentMethods)[number];
 
 const addressLine = (max: number) => z.string().trim().min(1).max(max);
